@@ -172,6 +172,7 @@ export default function CellularAutomataDemo() {
   const [speedIdx, setSpeedIdx] = useState(1);
 
   const [colorPaletteId, setColorPaletteId] = useState(null);
+  const [zoom, setZoom] = useState(1);
 
   const canvasRef = useRef(null);
   const gridRef = useRef(makeRandomGrid("brian"));
@@ -291,7 +292,7 @@ export default function CellularAutomataDemo() {
         onPointerUp={() => { drawingRef.current = false; }}
         onPointerCancel={() => { drawingRef.current = false; }}
         className="absolute inset-0 w-full h-full touch-none"
-        style={{ cursor: patternBrush ? "copy" : "crosshair", imageRendering: "pixelated" }}
+        style={{ cursor: patternBrush ? "copy" : "crosshair", imageRendering: "pixelated", transform: `scale(${zoom})`, transformOrigin: "center center" }}
       />
 
       {/* ─── Protection gradients ─── */}
@@ -322,6 +323,41 @@ export default function CellularAutomataDemo() {
         <span className="text-white font-bold">{String(generation).padStart(4, "0")}</span>
       </div>
 
+      {/* ─── Left: speed pill ─── */}
+      <div
+        className={`absolute left-3 z-20 flex flex-col items-center p-[3px] rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10 transition-opacity duration-200 ${sheet ? "opacity-0 pointer-events-none" : "opacity-100"}`}
+        style={{ top: "50%", transform: "translateY(-50%)" }}
+      >
+        {["4×", "2×", "1×", "⅓×"].map((label, i) => {
+          const idx = 3 - i;
+          return (
+            <button
+              key={idx}
+              onClick={() => setSpeedIdx(idx)}
+              className={`px-2 py-1.5 rounded-full text-[11px] font-bold tabular-nums transition w-8 text-center ${
+                speedIdx === idx ? "bg-white/15 text-white" : "text-slate-400 active:bg-white/5"
+              }`}
+            >{label}</button>
+          );
+        })}
+      </div>
+
+      {/* ─── Right: zoom pill ─── */}
+      <div
+        className={`absolute right-3 z-20 flex flex-col items-center p-[3px] rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10 transition-opacity duration-200 ${sheet ? "opacity-0 pointer-events-none" : "opacity-100"}`}
+        style={{ top: "50%", transform: "translateY(-50%)" }}
+      >
+        {[{ label: "2×", v: 2 }, { label: "1.5×", v: 1.5 }, { label: "1×", v: 1 }, { label: "¾×", v: 0.75 }, { label: "½×", v: 0.5 }].map(({ label, v }) => (
+          <button
+            key={v}
+            onClick={() => setZoom(v)}
+            className={`px-2 py-1.5 rounded-full text-[11px] font-bold tabular-nums transition w-9 text-center ${
+              zoom === v ? "bg-white/15 text-white" : "text-slate-400 active:bg-white/5"
+            }`}
+          >{label}</button>
+        ))}
+      </div>
+
       {/* ─── Pattern brush badge ─── */}
       {patternBrush && !sheet && (
         <div className="absolute top-16 left-1/2 -translate-x-1/2 z-20 mt-8 flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-violet-600/85 backdrop-blur-xl border border-white/15 shadow-lg shadow-violet-600/40">
@@ -338,19 +374,6 @@ export default function CellularAutomataDemo() {
         className={`absolute left-0 right-0 z-30 flex flex-col items-center gap-2.5 transition-opacity duration-200 ${sheet ? "opacity-40 pointer-events-none" : "opacity-100"}`}
         style={{ bottom: "max(env(safe-area-inset-bottom), 24px)" }}
       >
-        {/* speed dial */}
-        <div className="flex items-center p-[3px] rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10">
-          {["⅓×", "1×", "2×", "4×"].map((label, i) => (
-            <button
-              key={i}
-              onClick={() => setSpeedIdx(i)}
-              className={`px-2.5 py-1 rounded-full text-[11px] font-bold tabular-nums transition ${
-                speedIdx === i ? "bg-white/15 text-white" : "text-slate-400 active:bg-white/5"
-              }`}
-            >{label}</button>
-          ))}
-        </div>
-
         {/* primary capsule */}
         <div className="flex items-center gap-1.5 p-2 rounded-[36px] bg-slate-900/80 backdrop-blur-2xl border border-white/10 shadow-2xl shadow-black/50">
           <HudIcon onClick={clearGrid} title="Clear"><TrashIcon /></HudIcon>
