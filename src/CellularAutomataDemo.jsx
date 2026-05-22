@@ -347,7 +347,7 @@ export default function CellularAutomataDemo() {
         className={`absolute right-3 z-20 flex flex-col items-center p-[3px] rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10 transition-opacity duration-200 ${sheet ? "opacity-0 pointer-events-none" : "opacity-100"}`}
         style={{ top: "50%", transform: "translateY(-50%)" }}
       >
-        {[{ label: "2×", v: 2 }, { label: "1.5×", v: 1.5 }, { label: "1×", v: 1 }, { label: "¾×", v: 0.75 }, { label: "½×", v: 0.5 }].map(({ label, v }) => (
+        {[{ label: "3×", v: 3 }, { label: "2×", v: 2 }, { label: "1.5×", v: 1.5 }, { label: "1×", v: 1 }].map(({ label, v }) => (
           <button
             key={v}
             onClick={() => setZoom(v)}
