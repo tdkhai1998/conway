@@ -189,14 +189,23 @@ export default function CellularAutomataDemo() {
     draw(gridRef.current);
   }
 
+  function getEventPos(event) {
+    if (event.touches) {
+      const touch = event.touches[0] || event.changedTouches[0];
+      return { clientX: touch.clientX, clientY: touch.clientY };
+    }
+    return { clientX: event.clientX, clientY: event.clientY };
+  }
+
   function paintCell(event) {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
-    const col = Math.floor(((event.clientX - rect.left) * scaleX) / CELL);
-    const row = Math.floor(((event.clientY - rect.top) * scaleY) / CELL);
+    const { clientX, clientY } = getEventPos(event);
+    const col = Math.floor(((clientX - rect.left) * scaleX) / CELL);
+    const row = Math.floor(((clientY - rect.top) * scaleY) / CELL);
     if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return;
 
     if (selectedPattern) {
@@ -248,13 +257,13 @@ export default function CellularAutomataDemo() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-white pb-56">
-      <main className="p-6 flex flex-col items-center gap-4">
+      <main className="p-3 md:p-6 flex flex-col items-center gap-4">
         <div className="max-w-4xl w-full">
-          <h1 className="text-3xl font-bold">{mode === "conway" ? "Life-like Cellular Automata" : "Brian's Brain Cellular Automaton"}</h1>
+          <h1 className="text-xl md:text-3xl font-bold">{mode === "conway" ? "Life-like Cellular Automata" : "Brian's Brain Cellular Automaton"}</h1>
           <p className="text-slate-400 mt-1">{description}</p>
           <p className="text-slate-500 text-sm mt-1">{selectedPattern ? `Pattern brush: ${selectedPattern.label}. Click canvas để đặt pattern.` : "Click/drag trực tiếp trên canvas để vẽ cell."}</p>
         </div>
-        <div className="rounded-3xl overflow-hidden border border-slate-800 shadow-2xl">
+        <div className="rounded-3xl overflow-hidden border border-slate-800 shadow-2xl w-full">
           <canvas
             ref={canvasRef}
             width={COLS * CELL}
@@ -263,22 +272,26 @@ export default function CellularAutomataDemo() {
             onMouseMove={(event) => { if (isDrawing && !selectedPattern) paintCell(event); }}
             onMouseUp={() => setIsDrawing(false)}
             onMouseLeave={() => setIsDrawing(false)}
-            className="cursor-crosshair"
+            onTouchStart={(event) => { event.preventDefault(); setIsDrawing(true); paintCell(event); }}
+            onTouchMove={(event) => { event.preventDefault(); if (!selectedPattern) paintCell(event); }}
+            onTouchEnd={() => setIsDrawing(false)}
+            style={{ width: "100%", height: "auto", touchAction: "none" }}
+            className="cursor-crosshair block"
           />
         </div>
       </main>
 
       <footer className="fixed bottom-0 left-0 right-0 border-t border-slate-800 bg-slate-950/95 backdrop-blur p-4 max-h-[45vh] overflow-y-auto">
         <div className="max-w-5xl mx-auto space-y-3">
-          <div className="flex gap-2 flex-wrap">
-            <button onClick={() => setMode(mode === "conway" ? "brian" : "conway")} className="px-4 py-2 rounded-2xl bg-yellow-600 hover:bg-yellow-500 transition">{mode === "conway" ? "Switch to Brian's Brain" : "Switch to Life-like"}</button>
-            <button onClick={() => setRunning(!running)} className="px-4 py-2 rounded-2xl bg-sky-500 hover:bg-sky-400 transition">{running ? "Pause" : "Resume"}</button>
-            <button onClick={randomizeGrid} className="px-4 py-2 rounded-2xl bg-slate-700 hover:bg-slate-600 transition">Randomize</button>
-            <button onClick={clearGrid} className="px-4 py-2 rounded-2xl bg-slate-800 hover:bg-slate-700 transition">Clear</button>
-            <button onClick={() => { setSelectedPattern(null); setBrushState(ON); }} className={`px-4 py-2 rounded-2xl transition ${!selectedPattern && brushState === ON ? "bg-sky-500" : "bg-slate-800 hover:bg-slate-700"}`}>Brush ON</button>
-            <button onClick={() => { setSelectedPattern(null); setBrushState(DYING); }} className={`px-4 py-2 rounded-2xl transition ${!selectedPattern && brushState === DYING ? "bg-purple-600" : "bg-slate-800 hover:bg-slate-700"}`}>Brush DYING</button>
-            <button onClick={() => { setSelectedPattern(null); setBrushState(OFF); }} className={`px-4 py-2 rounded-2xl transition ${!selectedPattern && brushState === OFF ? "bg-red-600" : "bg-slate-800 hover:bg-slate-700"}`}>Eraser</button>
-            {selectedPattern && <button onClick={clearPatternBrush} className="px-4 py-2 rounded-2xl bg-rose-700 hover:bg-rose-600 transition">Pattern Brush: {selectedPattern.label} ✕</button>}
+          <div className="flex gap-1.5 flex-wrap">
+            <button onClick={() => setMode(mode === "conway" ? "brian" : "conway")} className="px-3 py-1.5 text-sm rounded-2xl bg-yellow-600 hover:bg-yellow-500 transition">{mode === "conway" ? "Brian's Brain" : "Life-like"}</button>
+            <button onClick={() => setRunning(!running)} className="px-3 py-1.5 text-sm rounded-2xl bg-sky-500 hover:bg-sky-400 transition">{running ? "Pause" : "Resume"}</button>
+            <button onClick={randomizeGrid} className="px-3 py-1.5 text-sm rounded-2xl bg-slate-700 hover:bg-slate-600 transition">Random</button>
+            <button onClick={clearGrid} className="px-3 py-1.5 text-sm rounded-2xl bg-slate-800 hover:bg-slate-700 transition">Clear</button>
+            <button onClick={() => { setSelectedPattern(null); setBrushState(ON); }} className={`px-3 py-1.5 text-sm rounded-2xl transition ${!selectedPattern && brushState === ON ? "bg-sky-500" : "bg-slate-800 hover:bg-slate-700"}`}>ON</button>
+            <button onClick={() => { setSelectedPattern(null); setBrushState(DYING); }} className={`px-3 py-1.5 text-sm rounded-2xl transition ${!selectedPattern && brushState === DYING ? "bg-purple-600" : "bg-slate-800 hover:bg-slate-700"}`}>DYING</button>
+            <button onClick={() => { setSelectedPattern(null); setBrushState(OFF); }} className={`px-3 py-1.5 text-sm rounded-2xl transition ${!selectedPattern && brushState === OFF ? "bg-red-600" : "bg-slate-800 hover:bg-slate-700"}`}>Erase</button>
+            {selectedPattern && <button onClick={clearPatternBrush} className="px-3 py-1.5 text-sm rounded-2xl bg-rose-700 hover:bg-rose-600 transition">{selectedPattern.label} ✕</button>}
           </div>
 
           <div className="flex gap-2 flex-wrap">
