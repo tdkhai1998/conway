@@ -9,11 +9,15 @@
 // Tailwind classes are used throughout (matching the repo's setup).
 // No new dependencies required — drop into src/ and it just works.
 // ───────────────────────────────────────────────────────────────
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 // ─── Engine constants ──────────────────────────────────────────
-const ROWS = 100;
-const COLS = 64;
+// GRID_ROWS/COLS: full simulation grid (supports zoom=0.5 view)
+// BASE_ROWS/COLS: cells visible at zoom=1 (the "default" viewport)
+const GRID_ROWS = 200;
+const GRID_COLS = 128;
+const BASE_ROWS = 100;
+const BASE_COLS = 64;
 const CELL = 5;
 
 const OFF = 0;
@@ -116,10 +120,22 @@ const PALETTES = [
   { id: "cyan",   label: "Cyan",   colors: makeGradient(185) },
 ];
 
+// ─── Viewport helpers ──────────────────────────────────────────
+// zoom=1 → show BASE_ROWS×BASE_COLS (center of grid)
+// zoom=0.5 → show GRID_ROWS×GRID_COLS (full grid)
+// zoom=2 → show BASE_ROWS/2 × BASE_COLS/2 (center zoom-in)
+function getViewport(zoom) {
+  const visRows = Math.min(GRID_ROWS, Math.round(BASE_ROWS / zoom));
+  const visCols = Math.min(GRID_COLS, Math.round(BASE_COLS / zoom));
+  const rowOff = Math.floor((GRID_ROWS - visRows) / 2);
+  const colOff = Math.floor((GRID_COLS - visCols) / 2);
+  return { visRows, visCols, rowOff, colOff };
+}
+
 // ─── Engine helpers ────────────────────────────────────────────
 function makeRandomGrid(mode) {
-  return Array.from({ length: ROWS }, () =>
-    Array.from({ length: COLS }, () => {
+  return Array.from({ length: GRID_ROWS }, () =>
+    Array.from({ length: GRID_COLS }, () => {
       const r = Math.random();
       if (mode === "brian") {
         if (r < 0.06) return ON;
@@ -136,7 +152,7 @@ function countOn(g, r, c) {
   for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
     if (!dr && !dc) continue;
     const nr = r + dr, nc = c + dc;
-    if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && g[nr][nc] === ON) n++;
+    if (nr >= 0 && nr < GRID_ROWS && nc >= 0 && nc < GRID_COLS && g[nr][nc] === ON) n++;
   }
   return n;
 }
@@ -168,16 +184,32 @@ export default function CellularAutomataDemo() {
   const [brush, setBrush] = useState(ON);
   const [patternBrush, setPatternBrush] = useState(null);
   const [generation, setGeneration] = useState(0);
-  const [sheet, setSheet] = useState(null); // "brush" | "patterns" | "rules" | null
+  const [sheet, setSheet] = useState(null); // "brush" | "patterns" | "rules" | "color" | null
   const [speedIdx, setSpeedIdx] = useState(1);
 
   const [colorPaletteId, setColorPaletteId] = useState(null);
   const [zoom, setZoom] = useState(1);
+  const [speedCollapsed, setSpeedCollapsed] = useState(true);
+  const [zoomCollapsed, setZoomCollapsed] = useState(true);
+  const [hudCollapsed, setHudCollapsed] = useState(false);
+
+  const SPEED_LABELS = ["⅓×", "1×", "2×", "4×"];
+  const ZOOM_OPTIONS = [
+    { label: "3×",   v: 3 },
+    { label: "2×",   v: 2 },
+    { label: "1.5×", v: 1.5 },
+    { label: "1×",   v: 1 },
+    { label: "¾×",   v: 0.75 },
+    { label: "½×",   v: 0.5 },
+  ];
 
   const canvasRef = useRef(null);
   const gridRef = useRef(makeRandomGrid("brian"));
   const drawingRef = useRef(false);
   const colorRef = useRef(null); // null = classic | colors array
+  const zoomRef = useRef(1);    // mirror of zoom state for use inside closures
+  const speedPressRef = useRef(null);
+  const zoomPressRef = useRef(null);
 
   const SPEEDS = [240, 90, 45, 22];
   const tickMs = SPEEDS[speedIdx];
@@ -186,12 +218,14 @@ export default function CellularAutomataDemo() {
     const cv = canvasRef.current;
     if (!cv) return;
     const ctx = cv.getContext("2d");
+    const { visRows, visCols, rowOff, colOff } = getViewport(zoomRef.current);
     ctx.fillStyle = "#0f172a";
     ctx.fillRect(0, 0, cv.width, cv.height);
-    for (let r = 0; r < ROWS; r++) {
-      for (let c = 0; c < COLS; c++) {
-        const s = g[r][c];
-        if (s === ON) ctx.fillStyle = colorRef.current ? colorRef.current[countOn(g, r, c)] : "#38bdf8";
+    for (let r = 0; r < visRows; r++) {
+      for (let c = 0; c < visCols; c++) {
+        const gr = r + rowOff, gc = c + colOff;
+        const s = g[gr][gc];
+        if (s === ON) ctx.fillStyle = colorRef.current ? colorRef.current[countOn(g, gr, gc)] : "#38bdf8";
         else if (s === DYING) ctx.fillStyle = "#7c3aed";
         else continue;
         ctx.fillRect(c * CELL, r * CELL, CELL - 1, CELL - 1);
@@ -212,22 +246,31 @@ export default function CellularAutomataDemo() {
     return () => clearInterval(t);
   }, [running, mode, birth, survive, tickMs]);
 
+  // Redraw immediately when zoom changes (canvas dims reset, need sync redraw)
+  useLayoutEffect(() => {
+    zoomRef.current = zoom;
+    draw(gridRef.current);
+  }, [zoom]);
+
   function randomize() {
     gridRef.current = makeRandomGrid(mode);
     draw(gridRef.current);
     setGeneration(0);
   }
   function clearGrid() {
-    gridRef.current = Array.from({ length: ROWS }, () => Array(COLS).fill(OFF));
+    gridRef.current = Array.from({ length: GRID_ROWS }, () => Array(GRID_COLS).fill(OFF));
     draw(gridRef.current);
     setGeneration(0);
   }
-  function stamp(pattern, sr, sc) {
+
+  // sr, sc are viewport-relative coordinates
+  function stamp(pattern, vsr, vsc) {
+    const { rowOff, colOff } = getViewport(zoomRef.current);
     const next = gridRef.current.map((row) => [...row]);
     for (let r = 0; r < pattern.length; r++) {
       for (let c = 0; c < pattern[r].length; c++) {
-        const rr = sr + r, cc = sc + c;
-        if (rr >= 0 && rr < ROWS && cc >= 0 && cc < COLS) {
+        const rr = vsr + rowOff + r, cc = vsc + colOff + c;
+        if (rr >= 0 && rr < GRID_ROWS && cc >= 0 && cc < GRID_COLS) {
           next[rr][cc] = mode === "conway" && pattern[r][c] === DYING ? OFF : pattern[r][c];
         }
       }
@@ -235,21 +278,24 @@ export default function CellularAutomataDemo() {
     gridRef.current = next;
     draw(gridRef.current);
   }
+
   function paintAt(clientX, clientY) {
     const cv = canvasRef.current;
     if (!cv) return;
     const rect = cv.getBoundingClientRect();
     const sx = cv.width / rect.width, sy = cv.height / rect.height;
-    const col = Math.floor(((clientX - rect.left) * sx) / CELL);
-    const row = Math.floor(((clientY - rect.top) * sy) / CELL);
-    if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return;
+    const vcol = Math.floor(((clientX - rect.left) * sx) / CELL); // viewport col
+    const vrow = Math.floor(((clientY - rect.top) * sy) / CELL);  // viewport row
+    const { visRows, visCols, rowOff, colOff } = getViewport(zoomRef.current);
+    if (vrow < 0 || vrow >= visRows || vcol < 0 || vcol >= visCols) return;
     if (patternBrush) {
       const p = PATTERNS[patternBrush];
-      stamp(p, row - Math.floor(p.length / 2), col - Math.floor(p[0].length / 2));
+      stamp(p, vrow - Math.floor(p.length / 2), vcol - Math.floor(p[0].length / 2));
       return;
     }
+    const gridRow = vrow + rowOff, gridCol = vcol + colOff;
     const next = gridRef.current.map((r) => [...r]);
-    next[row][col] = mode === "conway" && brush === DYING ? OFF : brush;
+    next[gridRow][gridCol] = mode === "conway" && brush === DYING ? OFF : brush;
     gridRef.current = next;
     draw(gridRef.current);
   }
@@ -258,6 +304,40 @@ export default function CellularAutomataDemo() {
     colorRef.current = palette ? palette.colors : null;
     setColorPaletteId(palette?.id ?? null);
     draw(gridRef.current);
+  }
+
+  function onSpeedDown() {
+    speedPressRef.current = setTimeout(() => { speedPressRef.current = "fired"; setSpeedCollapsed(false); }, 400);
+  }
+  function onSpeedUp() {
+    if (speedPressRef.current && speedPressRef.current !== "fired") {
+      clearTimeout(speedPressRef.current); speedPressRef.current = null;
+      setSpeedIdx(i => (i + 1) % 4);
+    } else { speedPressRef.current = null; }
+  }
+  function onSpeedCancel() {
+    if (speedPressRef.current && speedPressRef.current !== "fired") clearTimeout(speedPressRef.current);
+    speedPressRef.current = null;
+  }
+
+  function onZoomDown() {
+    zoomPressRef.current = setTimeout(() => { zoomPressRef.current = "fired"; setZoomCollapsed(false); }, 400);
+  }
+  function onZoomUp() {
+    if (zoomPressRef.current && zoomPressRef.current !== "fired") {
+      clearTimeout(zoomPressRef.current); zoomPressRef.current = null;
+      const cur = ZOOM_OPTIONS.findIndex(o => o.v === zoom);
+      changeZoom(ZOOM_OPTIONS[(cur + 1) % ZOOM_OPTIONS.length].v);
+    } else { zoomPressRef.current = null; }
+  }
+  function onZoomCancel() {
+    if (zoomPressRef.current && zoomPressRef.current !== "fired") clearTimeout(zoomPressRef.current);
+    zoomPressRef.current = null;
+  }
+
+  function changeZoom(v) {
+    zoomRef.current = v;
+    setZoom(v);
   }
 
   function toggleMode() {
@@ -280,19 +360,24 @@ export default function CellularAutomataDemo() {
 
   const cat = CATALOG[mode];
 
+  // Canvas dimensions match the visible viewport in pixels
+  const { visRows, visCols } = getViewport(zoom);
+  const canvasW = visCols * CELL;
+  const canvasH = visRows * CELL;
+
   return (
     <div className="fixed inset-0 bg-slate-950 overflow-hidden text-white font-sans">
       {/* ─── Canvas full-bleed ─── */}
       <canvas
         ref={canvasRef}
-        width={COLS * CELL}
-        height={ROWS * CELL}
+        width={canvasW}
+        height={canvasH}
         onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); drawingRef.current = true; paintAt(e.clientX, e.clientY); }}
         onPointerMove={(e) => { if (drawingRef.current && !patternBrush) paintAt(e.clientX, e.clientY); }}
         onPointerUp={() => { drawingRef.current = false; }}
         onPointerCancel={() => { drawingRef.current = false; }}
         className="absolute inset-0 w-full h-full touch-none"
-        style={{ cursor: patternBrush ? "copy" : "crosshair", imageRendering: "pixelated", transform: `scale(${zoom})`, transformOrigin: "center center" }}
+        style={{ cursor: patternBrush ? "copy" : "crosshair", imageRendering: "pixelated" }}
       />
 
       {/* ─── Protection gradients ─── */}
@@ -325,42 +410,80 @@ export default function CellularAutomataDemo() {
 
       {/* ─── Left: speed pill ─── */}
       <div
-        className={`absolute left-3 z-20 flex flex-col items-center p-[3px] rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10 transition-opacity duration-200 ${sheet ? "opacity-0 pointer-events-none" : "opacity-100"}`}
-        style={{ top: "50%", transform: "translateY(-50%)" }}
+        className={`absolute left-3 z-30 transition-all duration-300 ${sheet ? "opacity-0 pointer-events-none" : "opacity-100"}`}
+        style={hudCollapsed
+          ? { bottom: "max(env(safe-area-inset-bottom), 24px)" }
+          : { top: "50%", transform: "translateY(-50%)" }}
       >
-        {["4×", "2×", "1×", "⅓×"].map((label, i) => {
-          const idx = 3 - i;
-          return (
+        {speedCollapsed ? (
+          /* Collapsed trigger */
+          <div className="flex flex-col items-center p-[3px] rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10">
             <button
-              key={idx}
-              onClick={() => setSpeedIdx(idx)}
-              className={`px-2 py-1.5 rounded-full text-[11px] font-bold tabular-nums transition w-8 text-center ${
-                speedIdx === idx ? "bg-white/15 text-white" : "text-slate-400 active:bg-white/5"
-              }`}
-            >{label}</button>
-          );
-        })}
+              onPointerDown={onSpeedDown} onPointerUp={onSpeedUp} onPointerCancel={onSpeedCancel}
+              className="px-2 py-2 rounded-full text-[11px] font-bold tabular-nums text-white w-8 text-center active:bg-white/10 transition select-none"
+            >{SPEED_LABELS[speedIdx]}</button>
+          </div>
+        ) : (
+          /* Expanded list + collapse button */
+          <div className="flex flex-col items-center p-[3px] rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10">
+            {["4×", "2×", "1×", "⅓×"].map((label, i) => {
+              const idx = 3 - i;
+              return (
+                <button
+                  key={idx}
+                  onClick={() => setSpeedIdx(idx)}
+                  className={`px-2 py-1.5 rounded-full text-[11px] font-bold tabular-nums transition w-8 text-center ${
+                    speedIdx === idx ? "bg-white/15 text-white" : "text-slate-400 active:bg-white/5"
+                  }`}
+                >{label}</button>
+              );
+            })}
+            <button
+              onClick={() => setSpeedCollapsed(true)}
+              className="px-2 py-1 rounded-full text-[9px] text-slate-500 hover:text-slate-300 transition w-8 text-center mt-0.5"
+            >✕</button>
+          </div>
+        )}
       </div>
 
       {/* ─── Right: zoom pill ─── */}
       <div
-        className={`absolute right-3 z-20 flex flex-col items-center p-[3px] rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10 transition-opacity duration-200 ${sheet ? "opacity-0 pointer-events-none" : "opacity-100"}`}
-        style={{ top: "50%", transform: "translateY(-50%)" }}
+        className={`absolute right-3 z-30 transition-all duration-300 ${sheet ? "opacity-0 pointer-events-none" : "opacity-100"}`}
+        style={hudCollapsed
+          ? { bottom: "max(env(safe-area-inset-bottom), 24px)" }
+          : { top: "50%", transform: "translateY(-50%)" }}
       >
-        {[{ label: "3×", v: 3 }, { label: "2×", v: 2 }, { label: "1.5×", v: 1.5 }, { label: "1×", v: 1 }].map(({ label, v }) => (
-          <button
-            key={v}
-            onClick={() => setZoom(v)}
-            className={`px-2 py-1.5 rounded-full text-[11px] font-bold tabular-nums transition w-9 text-center ${
-              zoom === v ? "bg-white/15 text-white" : "text-slate-400 active:bg-white/5"
-            }`}
-          >{label}</button>
-        ))}
+        {zoomCollapsed ? (
+          /* Collapsed trigger */
+          <div className="flex flex-col items-center p-[3px] rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10">
+            <button
+              onPointerDown={onZoomDown} onPointerUp={onZoomUp} onPointerCancel={onZoomCancel}
+              className="px-2 py-2 rounded-full text-[11px] font-bold tabular-nums text-white w-9 text-center active:bg-white/10 transition select-none"
+            >{ZOOM_OPTIONS.find(o => o.v === zoom)?.label ?? "1×"}</button>
+          </div>
+        ) : (
+          /* Expanded list + collapse button */
+          <div className="flex flex-col items-center p-[3px] rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10">
+            {ZOOM_OPTIONS.map(({ label, v }) => (
+              <button
+                key={v}
+                onClick={() => changeZoom(v)}
+                className={`px-2 py-1.5 rounded-full text-[11px] font-bold tabular-nums transition w-9 text-center ${
+                  zoom === v ? "bg-white/15 text-white" : "text-slate-400 active:bg-white/5"
+                }`}
+              >{label}</button>
+            ))}
+            <button
+              onClick={() => setZoomCollapsed(true)}
+              className="px-2 py-1 rounded-full text-[9px] text-slate-500 hover:text-slate-300 transition w-9 text-center mt-0.5"
+            >✕</button>
+          </div>
+        )}
       </div>
 
       {/* ─── Pattern brush badge ─── */}
       {patternBrush && !sheet && (
-        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-20 mt-8 flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-violet-600/85 backdrop-blur-xl border border-white/15 shadow-lg shadow-violet-600/40">
+        <div className="absolute left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-violet-600/85 backdrop-blur-xl border border-white/15 shadow-lg shadow-violet-600/40" style={{ top: "max(env(safe-area-inset-top), 12px)" }}>
           <span className="text-xs font-bold">● Tap to place {patternBrush}</span>
           <button
             onClick={() => setPatternBrush(null)}
@@ -371,35 +494,49 @@ export default function CellularAutomataDemo() {
 
       {/* ─── Bottom floating HUD ─── */}
       <div
-        className={`absolute left-0 right-0 z-30 flex flex-col items-center gap-2.5 transition-opacity duration-200 ${sheet ? "opacity-40 pointer-events-none" : "opacity-100"}`}
+        className={`absolute left-0 right-0 z-30 flex flex-col items-center gap-2.5 transition-opacity duration-200 ${sheet ? "opacity-40 pointer-events-none" : "opacity-100"} ${hudCollapsed ? "pointer-events-none" : ""}`}
         style={{ bottom: "max(env(safe-area-inset-bottom), 24px)" }}
       >
-        {/* primary capsule */}
-        <div className="flex items-center gap-1.5 p-2 rounded-[36px] bg-slate-900/80 backdrop-blur-2xl border border-white/10 shadow-2xl shadow-black/50">
-          <HudIcon onClick={clearGrid} title="Clear"><TrashIcon /></HudIcon>
-          <HudIcon onClick={randomize} title="Randomize"><DiceIcon /></HudIcon>
-          <HudIcon onClick={() => setSheet("brush")} title="Brush"
-            active={sheet === "brush"} activeColor={brushColor(brush)}
-          ><BrushIcon /></HudIcon>
+        {hudCollapsed ? (
+          /* Collapsed: just expand handle */
           <button
-            onClick={() => setRunning(!running)}
-            className={`w-[54px] h-[54px] rounded-full flex items-center justify-center text-white active:scale-95 transition shadow-lg ${
-              running ? "bg-violet-600 shadow-violet-600/50" : "bg-sky-500 shadow-sky-500/50"
-            }`}
-            style={{ boxShadow: `0 6px 20px ${running ? "rgba(124,58,237,0.5)" : "rgba(14,165,233,0.5)"}, inset 0 1px 0 rgba(255,255,255,0.2)` }}
-          >
-            {running ? <PauseIcon /> : <PlayIcon />}
-          </button>
-          <HudIcon onClick={() => setSheet("patterns")} title="Patterns"
-            active={sheet === "patterns"} activeColor="bg-violet-600"
-          ><PatternsIcon /></HudIcon>
-          <HudIcon onClick={() => setSheet("rules")} title="Rules"
-            active={sheet === "rules"} activeColor="bg-yellow-600"
-          ><SlidersIcon /></HudIcon>
-          <HudIcon onClick={() => setSheet("color")} title="Color"
-            active={sheet === "color" || colorPaletteId !== null} activeColor="bg-orange-500"
-          ><PaletteIcon /></HudIcon>
-        </div>
+            onClick={() => { setHudCollapsed(false); }}
+            className="pointer-events-auto px-5 py-1.5 rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10 text-slate-500 hover:text-slate-300 transition text-[11px]"
+          >▲</button>
+        ) : (
+          /* Expanded: full capsule + separate collapse handle */
+          <>
+            <div className="flex items-center gap-1.5 p-2 rounded-[36px] bg-slate-900/80 backdrop-blur-2xl border border-white/10 shadow-2xl shadow-black/50">
+              <HudIcon onClick={clearGrid} title="Clear"><TrashIcon /></HudIcon>
+              <HudIcon onClick={randomize} title="Randomize"><DiceIcon /></HudIcon>
+              <HudIcon onClick={() => setSheet("brush")} title="Brush"
+                active={sheet === "brush"} activeColor={brushColor(brush)}
+              ><BrushIcon /></HudIcon>
+              <button
+                onClick={() => setRunning(!running)}
+                className={`w-[54px] h-[54px] rounded-full flex items-center justify-center text-white active:scale-95 transition shadow-lg ${
+                  running ? "bg-violet-600 shadow-violet-600/50" : "bg-sky-500 shadow-sky-500/50"
+                }`}
+                style={{ boxShadow: `0 6px 20px ${running ? "rgba(124,58,237,0.5)" : "rgba(14,165,233,0.5)"}, inset 0 1px 0 rgba(255,255,255,0.2)` }}
+              >
+                {running ? <PauseIcon /> : <PlayIcon />}
+              </button>
+              <HudIcon onClick={() => setSheet("patterns")} title="Patterns"
+                active={sheet === "patterns"} activeColor="bg-violet-600"
+              ><PatternsIcon /></HudIcon>
+              <HudIcon onClick={() => setSheet("rules")} title="Rules"
+                active={sheet === "rules"} activeColor="bg-yellow-600"
+              ><SlidersIcon /></HudIcon>
+              <HudIcon onClick={() => setSheet("color")} title="Color"
+                active={sheet === "color" || colorPaletteId !== null} activeColor="bg-orange-500"
+              ><PaletteIcon /></HudIcon>
+            </div>
+            <button
+              onClick={() => { setHudCollapsed(true); setSpeedCollapsed(true); setZoomCollapsed(true); }}
+              className="px-5 py-1 rounded-full bg-slate-900/60 backdrop-blur-xl border border-white/10 text-slate-600 hover:text-slate-400 transition text-[10px]"
+            >▼</button>
+          </>
+        )}
       </div>
 
       {/* ─── Sheet overlay ─── */}
