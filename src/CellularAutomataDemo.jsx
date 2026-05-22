@@ -100,6 +100,19 @@ const PRESETS = [
   { id: "daynight",  label: "Day & Night", rule: "B3678/S34678",   birth: [3,6,7,8],  survive: [3,4,6,7,8] },
 ];
 
+// ─── Heatmap colors for neighbor count 0–8 ────────────────────
+const HEAT = [
+  "#0f4c75", // 0 — isolated
+  "#1565c0", // 1
+  "#38bdf8", // 2 — classic ON color
+  "#34d399", // 3
+  "#fbbf24", // 4
+  "#f97316", // 5
+  "#ef4444", // 6
+  "#dc2626", // 7
+  "#9f1239", // 8 — overcrowded
+];
+
 // ─── Engine helpers ────────────────────────────────────────────
 function makeRandomGrid(mode) {
   return Array.from({ length: ROWS }, () =>
@@ -155,9 +168,12 @@ export default function CellularAutomataDemo() {
   const [sheet, setSheet] = useState(null); // "brush" | "patterns" | "rules" | null
   const [speedIdx, setSpeedIdx] = useState(1);
 
+  const [heatOn, setHeatOn] = useState(false);
+
   const canvasRef = useRef(null);
   const gridRef = useRef(makeRandomGrid("brian"));
   const drawingRef = useRef(false);
+  const heatRef = useRef(false);
 
   const SPEEDS = [240, 90, 45, 22];
   const tickMs = SPEEDS[speedIdx];
@@ -171,7 +187,7 @@ export default function CellularAutomataDemo() {
     for (let r = 0; r < ROWS; r++) {
       for (let c = 0; c < COLS; c++) {
         const s = g[r][c];
-        if (s === ON) ctx.fillStyle = "#38bdf8";
+        if (s === ON) ctx.fillStyle = heatRef.current ? HEAT[countOn(g, r, c)] : "#38bdf8";
         else if (s === DYING) ctx.fillStyle = "#7c3aed";
         else continue;
         ctx.fillRect(c * CELL, r * CELL, CELL - 1, CELL - 1);
@@ -231,6 +247,12 @@ export default function CellularAutomataDemo() {
     const next = gridRef.current.map((r) => [...r]);
     next[row][col] = mode === "conway" && brush === DYING ? OFF : brush;
     gridRef.current = next;
+    draw(gridRef.current);
+  }
+
+  function toggleHeat() {
+    heatRef.current = !heatRef.current;
+    setHeatOn(heatRef.current);
     draw(gridRef.current);
   }
 
@@ -348,6 +370,9 @@ export default function CellularAutomataDemo() {
           <HudIcon onClick={() => setSheet("rules")} title="Rules"
             active={sheet === "rules"} activeColor="bg-yellow-600"
           ><SlidersIcon /></HudIcon>
+          <HudIcon onClick={toggleHeat} title="Heatmap"
+            active={heatOn} activeColor="bg-orange-500"
+          ><HeatIcon /></HudIcon>
         </div>
       </div>
 
@@ -632,6 +657,23 @@ function SlidersIcon() {
       <circle cx="12" cy="7" r="2" fill="currentColor"/>
       <circle cx="16" cy="12" r="2" fill="currentColor"/>
       <circle cx="8" cy="17" r="2" fill="currentColor"/>
+    </svg>
+  );
+}
+function HeatIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round">
+      <defs>
+        <linearGradient id="hg" x1="0" y1="1" x2="1" y2="0">
+          <stop offset="0%" stopColor="#38bdf8"/>
+          <stop offset="50%" stopColor="#fbbf24"/>
+          <stop offset="100%" stopColor="#ef4444"/>
+        </linearGradient>
+      </defs>
+      <rect x="3" y="3" width="18" height="18" rx="3" fill="url(#hg)" opacity="0.9"/>
+      <circle cx="8" cy="16" r="1.5" fill="white" opacity="0.6"/>
+      <circle cx="12" cy="10" r="1.5" fill="white" opacity="0.6"/>
+      <circle cx="16" cy="7" r="1.5" fill="white" opacity="0.6"/>
     </svg>
   );
 }
