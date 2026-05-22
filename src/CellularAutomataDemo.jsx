@@ -78,10 +78,18 @@ const CATALOG = {
     { key: "yinYang",     label: "Yin Yang",     color: "violet-400", sub: "Balanced duality" },
   ],
   brian: [
-    { key: "neuronFiring",  label: "Neuron",   color: "violet-500", sub: "Radial pulse" },
-    { key: "electricWave",  label: "Wave",     color: "emerald-500",sub: "Lattice ripple" },
-    { key: "galaxy",        label: "Galaxy",   color: "pink-500",   sub: "Spiral arms" },
-    { key: "neuralNetwork", label: "Network",  color: "orange-400", sub: "Neural grid" },
+    { key: "neuronFiring",  label: "Neuron",        color: "violet-500", sub: "Radial pulse" },
+    { key: "electricWave",  label: "Wave",          color: "emerald-500",sub: "Lattice ripple" },
+    { key: "galaxy",        label: "Galaxy",        color: "pink-500",   sub: "Spiral arms" },
+    { key: "neuralNetwork", label: "Network",       color: "orange-400", sub: "Neural grid" },
+    { key: "glider",        label: "Glider",        color: "sky-400",    sub: "Moves diagonally" },
+    { key: "blinker",       label: "Blinker",       color: "emerald-500",sub: "Period-2 oscillator" },
+    { key: "lwss",          label: "LWSS",          color: "cyan-500",   sub: "Lightweight spaceship" },
+    { key: "pulsar",        label: "Pulsar",        color: "violet-500", sub: "Period-3 oscillator" },
+    { key: "nightBloom",    label: "Night Bloom",   color: "fuchsia-500",sub: "Radial bloom" },
+    { key: "voidBloom",     label: "Void Bloom",    color: "indigo-400", sub: "Dense symmetry" },
+    { key: "yinYang",       label: "Yin Yang",      color: "violet-400", sub: "Balanced duality" },
+    { key: "reflector",     label: "Reflector",     color: "amber-500",  sub: "Symmetric structure" },
   ],
 };
 
