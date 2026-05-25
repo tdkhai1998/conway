@@ -23,6 +23,38 @@ const CELL = 5;
 const OFF = 0;
 const ON = 1;
 const DYING = 2;
+const MODE_ORDER = ["brian", "conway", "boids", "slime"];
+const BOID_DEFAULTS = {
+  count: 180,
+  vision: 44,
+  separation: 0.95,
+  alignment: 0.06,
+  cohesion: 0.012,
+  steer: 0.17,
+  minSpeed: 0.9,
+  maxSpeed: 2.7,
+  drag: 0.992,
+  randomness: 0.018,
+  bounce: false,
+};
+const BOID_COLOR_MODES = [
+  { id: "classic", label: "Classic" },
+  { id: "speed", label: "Speed" },
+  { id: "density", label: "Density" },
+  { id: "turn", label: "Turn Rate" },
+];
+const BOID_SHAPES = [
+  { id: "dart", label: "Dart" },
+  { id: "diamond", label: "Diamond" },
+  { id: "kite", label: "Kite" },
+  { id: "dot", label: "Dot" },
+  { id: "shark", label: "Shark" },
+];
+const SLIME_MAZE_LEVELS = {
+  easy: { label: "Easy", cellSize: 7, wallThickness: 1 },
+  medium: { label: "Medium", cellSize: 6, wallThickness: 2 },
+  hard: { label: "Hard", cellSize: 5, wallThickness: 3 },
+};
 
 const PATTERNS = {
   neuronFiring: [[0,0,1,0,0],[0,1,2,1,0],[1,2,0,2,1],[0,1,2,1,0],[0,0,1,0,0]],
@@ -174,6 +206,489 @@ function stepBrain(g) {
   }));
 }
 
+function rand(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+function makeBoids(count, w, h, shape = "dart") {
+  return Array.from({ length: count }, () => {
+    return {};
+  }).map((_, i) => {
+    const a = rand(0, Math.PI * 2);
+    const speed = rand(0.8, 2.2);
+    return {
+      x: rand(0, w),
+      y: rand(0, h),
+      vx: Math.cos(a) * speed,
+      vy: Math.sin(a) * speed,
+      turn: 0,
+      localDensity: 0,
+      shape,
+    };
+  });
+}
+
+function stepBoids(boids, opt, w, h, mouse, explosion, shark) {
+  const visionSq = opt.vision * opt.vision;
+  const sepSq = (opt.vision * 0.55) * (opt.vision * 0.55);
+  const maxNeighbors = 28;
+  const next = boids.map((b) => ({ ...b }));
+
+  for (let i = 0; i < boids.length; i++) {
+    const me = boids[i];
+    let cx = 0, cy = 0, ax = 0, ay = 0, sx = 0, sy = 0, n = 0;
+    for (let j = 0; j < boids.length; j++) {
+      if (i === j) continue;
+      const o = boids[j];
+      const dx = o.x - me.x;
+      const dy = o.y - me.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > visionSq) continue;
+      n++;
+      cx += o.x;
+      cy += o.y;
+      ax += o.vx;
+      ay += o.vy;
+      if (d2 < sepSq && d2 > 0.0001) {
+        sx -= dx / d2;
+        sy -= dy / d2;
+      }
+      if (n >= maxNeighbors) break;
+    }
+
+    let fx = 0, fy = 0;
+    if (n > 0) {
+      cx /= n; cy /= n; ax /= n; ay /= n;
+      fx += (cx - me.x) * opt.cohesion;
+      fy += (cy - me.y) * opt.cohesion;
+      fx += (ax - me.vx) * opt.alignment;
+      fy += (ay - me.vy) * opt.alignment;
+      fx += sx * opt.separation;
+      fy += sy * opt.separation;
+    }
+
+    if (mouse && mouse.active) {
+      const mdx = mouse.x - me.x;
+      const mdy = mouse.y - me.y;
+      const md2 = mdx * mdx + mdy * mdy;
+      if (md2 < mouse.radius * mouse.radius && md2 > 0.0001) {
+        const s = mouse.strength / Math.sqrt(md2);
+        fx += mdx * s;
+        fy += mdy * s;
+      }
+    }
+    if (explosion && explosion.active) {
+      const edx = me.x - explosion.x;
+      const edy = me.y - explosion.y;
+      const ed2 = edx * edx + edy * edy;
+      if (ed2 < explosion.radius * explosion.radius && ed2 > 0.0001) {
+        const ef = explosion.power * (1 - Math.sqrt(ed2) / explosion.radius);
+        fx += (edx / Math.sqrt(ed2)) * ef;
+        fy += (edy / Math.sqrt(ed2)) * ef;
+      }
+    }
+    if (shark && shark.active) {
+      const sdx = me.x - shark.x;
+      const sdy = me.y - shark.y;
+      const sd2 = sdx * sdx + sdy * sdy;
+      if (sd2 < shark.fearRadius * shark.fearRadius && sd2 > 0.0001) {
+        const sf = shark.fearStrength * (1 - Math.sqrt(sd2) / shark.fearRadius);
+        fx += (sdx / Math.sqrt(sd2)) * sf;
+        fy += (sdy / Math.sqrt(sd2)) * sf;
+      }
+    }
+
+    fx += rand(-1, 1) * opt.randomness;
+    fy += rand(-1, 1) * opt.randomness;
+    const fmag = Math.hypot(fx, fy);
+    if (fmag > opt.steer) {
+      fx = (fx / fmag) * opt.steer;
+      fy = (fy / fmag) * opt.steer;
+    }
+
+    const b = next[i];
+    const prevA = Math.atan2(b.vy, b.vx);
+    b.vx = (b.vx + fx) * opt.drag;
+    b.vy = (b.vy + fy) * opt.drag;
+    let speed = Math.hypot(b.vx, b.vy);
+    if (speed > opt.maxSpeed) {
+      b.vx = (b.vx / speed) * opt.maxSpeed;
+      b.vy = (b.vy / speed) * opt.maxSpeed;
+      speed = opt.maxSpeed;
+    }
+    if (speed < opt.minSpeed) {
+      const a = Math.atan2(b.vy, b.vx) || rand(0, Math.PI * 2);
+      b.vx = Math.cos(a) * opt.minSpeed;
+      b.vy = Math.sin(a) * opt.minSpeed;
+    }
+    const nextA = Math.atan2(b.vy, b.vx);
+    let da = nextA - prevA;
+    if (da > Math.PI) da -= Math.PI * 2;
+    if (da < -Math.PI) da += Math.PI * 2;
+    b.turn = Math.abs(da);
+    b.localDensity = n / maxNeighbors;
+
+    b.x += b.vx;
+    b.y += b.vy;
+    if (opt.bounce) {
+      if (b.x < 0 || b.x > w) { b.vx *= -1; b.x = Math.max(0, Math.min(w, b.x)); }
+      if (b.y < 0 || b.y > h) { b.vy *= -1; b.y = Math.max(0, Math.min(h, b.y)); }
+    } else {
+      if (b.x < 0) b.x += w;
+      if (b.x > w) b.x -= w;
+      if (b.y < 0) b.y += h;
+      if (b.y > h) b.y -= h;
+    }
+  }
+  return next;
+}
+
+function drawBoidShape(ctx, shape) {
+  if (shape === "shark") {
+    ctx.beginPath();
+    ctx.moveTo(12, 0);
+    ctx.lineTo(1, 4.8);
+    ctx.lineTo(-6, 6);
+    ctx.lineTo(-3.5, 1.8);
+    ctx.lineTo(-10, 0);
+    ctx.lineTo(-3.5, -1.8);
+    ctx.lineTo(-6, -6);
+    ctx.lineTo(1, -4.8);
+    ctx.closePath();
+    ctx.fill();
+    return;
+  }
+  if (shape === "dot") {
+    ctx.beginPath();
+    ctx.arc(0, 0, 3.2, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+  ctx.beginPath();
+  if (shape === "diamond") {
+    ctx.moveTo(7, 0);
+    ctx.lineTo(0, 4.5);
+    ctx.lineTo(-6, 0);
+    ctx.lineTo(0, -4.5);
+  } else if (shape === "kite") {
+    ctx.moveTo(8, 0);
+    ctx.lineTo(-3, 5);
+    ctx.lineTo(-7, 1.5);
+    ctx.lineTo(-5, 0);
+    ctx.lineTo(-7, -1.5);
+    ctx.lineTo(-3, -5);
+  } else {
+    ctx.moveTo(8, 0);
+    ctx.lineTo(-6, 4);
+    ctx.lineTo(-4, 0);
+    ctx.lineTo(-6, -4);
+  }
+  ctx.closePath();
+  ctx.fill();
+}
+
+function samplePalette(palette, t) {
+  if (!palette || palette.length === 0) return null;
+  const clamped = Math.max(0, Math.min(1, t));
+  const idx = Math.round(clamped * (palette.length - 1));
+  return palette[idx];
+}
+
+function hexToRgb(hex) {
+  if (!hex || hex[0] !== "#" || hex.length < 7) return null;
+  return {
+    r: parseInt(hex.slice(1, 3), 16),
+    g: parseInt(hex.slice(3, 5), 16),
+    b: parseInt(hex.slice(5, 7), 16),
+  };
+}
+
+function makeSlimeAgents(count, w, h) {
+  return Array.from({ length: count }, () => ({
+    x: rand(0, w),
+    y: rand(0, h),
+    a: rand(0, Math.PI * 2),
+  }));
+}
+
+function makeSlimeAgentsAt(count, x, y, spread, w, h) {
+  return Array.from({ length: count }, () => {
+    const a = rand(0, Math.PI * 2);
+    const d = rand(0, spread);
+    return {
+      x: Math.max(0, Math.min(w - 1, x + Math.cos(a) * d)),
+      y: Math.max(0, Math.min(h - 1, y + Math.sin(a) * d)),
+      a: rand(0, Math.PI * 2),
+    };
+  });
+}
+
+function makeTrailField(w, h) {
+  return new Float32Array(w * h);
+}
+
+function trailAt(field, w, h, x, y) {
+  const ix = Math.max(0, Math.min(w - 1, Math.floor(x)));
+  const iy = Math.max(0, Math.min(h - 1, Math.floor(y)));
+  return field[iy * w + ix] || 0;
+}
+
+function walkableAt(mask, w, h, x, y) {
+  if (!mask) return true;
+  const ix = Math.max(0, Math.min(w - 1, Math.floor(x)));
+  const iy = Math.max(0, Math.min(h - 1, Math.floor(y)));
+  return mask[iy * w + ix] === 1;
+}
+
+function erodeWalkable(mask, w, h, radius) {
+  if (radius <= 0) return mask;
+  const out = new Uint8Array(mask.length);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = y * w + x;
+      if (mask[idx] !== 1) continue;
+      let keep = 1;
+      for (let oy = -radius; oy <= radius && keep; oy++) {
+        for (let ox = -radius; ox <= radius; ox++) {
+          const xx = x + ox;
+          const yy = y + oy;
+          if (xx < 0 || yy < 0 || xx >= w || yy >= h) { keep = 0; break; }
+          if (mask[yy * w + xx] !== 1) { keep = 0; break; }
+        }
+      }
+      out[idx] = keep;
+    }
+  }
+  return out;
+}
+
+function generateMazeWorld(w, h, cellSize = 7, wallThickness = 1) {
+  const padX = 72;
+  const padTop = 92;
+  const padBottom = 150;
+  const usableW = Math.max(180, w - padX * 2);
+  const usableH = Math.max(180, h - padTop - padBottom);
+  const gwRaw = Math.max(21, Math.floor(usableW / cellSize));
+  const ghRaw = Math.max(21, Math.floor(usableH / cellSize));
+  const gw = gwRaw % 2 === 0 ? gwRaw - 1 : gwRaw;
+  const gh = ghRaw % 2 === 0 ? ghRaw - 1 : ghRaw;
+  const mazePixW = gw * cellSize;
+  const mazePixH = gh * cellSize;
+  const ox = Math.floor((w - mazePixW) / 2);
+  const oy = Math.floor(padTop + (usableH - mazePixH) / 2);
+
+  const grid = new Uint8Array(gw * gh).fill(1);
+  for (let y = 1; y < gh; y += 2) for (let x = 1; x < gw; x += 2) grid[y * gw + x] = 0;
+  const cw = (gw - 1) / 2;
+  const ch = (gh - 1) / 2;
+  const vis = new Uint8Array(cw * ch);
+  const stack = [[0, 0]];
+  vis[0] = 1;
+  const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+
+  while (stack.length) {
+    const top = stack[stack.length - 1];
+    const cx = top[0];
+    const cy = top[1];
+    const ns = [];
+    for (const [dx, dy] of dirs) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= cw || ny >= ch) continue;
+      if (!vis[ny * cw + nx]) ns.push([nx, ny, dx, dy]);
+    }
+    if (!ns.length) { stack.pop(); continue; }
+    const pick = ns[Math.floor(Math.random() * ns.length)];
+    const nx = pick[0], ny = pick[1], dx = pick[2], dy = pick[3];
+    vis[ny * cw + nx] = 1;
+    const gx = cx * 2 + 1, gy = cy * 2 + 1;
+    const wx = gx + dx, wy = gy + dy;
+    const tx = nx * 2 + 1, ty = ny * 2 + 1;
+    grid[wy * gw + wx] = 0;
+    grid[ty * gw + tx] = 0;
+    stack.push([nx, ny]);
+  }
+
+  const entry = { x: 0, y: 1 };
+  const exit = { x: gw - 1, y: gh - 2 };
+  grid[entry.y * gw + entry.x] = 0;
+  grid[entry.y * gw + 1] = 0;
+  grid[exit.y * gw + exit.x] = 0;
+  grid[exit.y * gw + (gw - 2)] = 0;
+
+  const rawMask = new Uint8Array(w * h);
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const gx = Math.floor((px - ox) / cellSize);
+      const gy = Math.floor((py - oy) / cellSize);
+      if (gx >= 0 && gy >= 0 && gx < gw && gy < gh) {
+        rawMask[py * w + px] = grid[gy * gw + gx] === 0 ? 1 : 0;
+      } else {
+        rawMask[py * w + px] = 0;
+      }
+    }
+  }
+  const mask = erodeWalkable(rawMask, w, h, wallThickness);
+
+  const ex = Math.floor(ox + (entry.x + 0.5) * cellSize);
+  const ey = Math.floor(oy + (entry.y + 0.5) * cellSize);
+  const tx = Math.floor(ox + (exit.x + 0.5) * cellSize);
+  const ty = Math.floor(oy + (exit.y + 0.5) * cellSize);
+  const carveR = Math.max(2, wallThickness + 1);
+  for (let y = -carveR; y <= carveR; y++) {
+    for (let x = -carveR; x <= carveR; x++) {
+      if (x * x + y * y > carveR * carveR) continue;
+      const aX = ex + x, aY = ey + y;
+      const bX = tx + x, bY = ty + y;
+      if (aX >= 0 && aY >= 0 && aX < w && aY < h) mask[aY * w + aX] = 1;
+      if (bX >= 0 && bY >= 0 && bX < w && bY < h) mask[bY * w + bX] = 1;
+    }
+  }
+
+  return {
+    mask,
+    entryPx: { x: ox + (entry.x + 0.5) * cellSize, y: oy + (entry.y + 0.5) * cellSize },
+    exitPx: { x: ox + (exit.x + 0.5) * cellSize, y: oy + (exit.y + 0.5) * cellSize },
+  };
+}
+
+function stepSlime(agents, field, w, h, opt, scratchA, scratchB) {
+  const deposited = scratchA;
+  deposited.set(field);
+  const sa = opt.sensorAngle;
+  const sd = opt.sensorDist;
+  const turn = opt.turnSpeed;
+
+  for (let i = 0; i < agents.length; i++) {
+    const ag = agents[i];
+    const fx = ag.x + Math.cos(ag.a) * sd, fy = ag.y + Math.sin(ag.a) * sd;
+    const lx = ag.x + Math.cos(ag.a - sa) * sd, ly = ag.y + Math.sin(ag.a - sa) * sd;
+    const rx = ag.x + Math.cos(ag.a + sa) * sd, ry = ag.y + Math.sin(ag.a + sa) * sd;
+    const f = walkableAt(opt.mazeMask, w, h, fx, fy) ? trailAt(deposited, w, h, fx, fy) : -1;
+    const l = walkableAt(opt.mazeMask, w, h, lx, ly) ? trailAt(deposited, w, h, lx, ly) : -1;
+    const r = walkableAt(opt.mazeMask, w, h, rx, ry) ? trailAt(deposited, w, h, rx, ry) : -1;
+    if (f < l && f < r) ag.a += (Math.random() < 0.5 ? -1 : 1) * turn;
+    else if (l > r) ag.a -= turn;
+    else if (r > l) ag.a += turn;
+    ag.a += rand(-1, 1) * opt.wiggle;
+
+    const nx = ag.x + Math.cos(ag.a) * opt.speed;
+    const ny = ag.y + Math.sin(ag.a) * opt.speed;
+    if (opt.mazeMask) {
+      if (walkableAt(opt.mazeMask, w, h, nx, ny)) {
+        ag.x = nx; ag.y = ny;
+      } else {
+        ag.a += (Math.random() < 0.5 ? -1 : 1) * turn * 1.8;
+      }
+    } else {
+      ag.x = nx;
+      ag.y = ny;
+      if (ag.x < 0) ag.x += w;
+      if (ag.x >= w) ag.x -= w;
+      if (ag.y < 0) ag.y += h;
+      if (ag.y >= h) ag.y -= h;
+    }
+
+    const ix = Math.floor(ag.x);
+    const iy = Math.floor(ag.y);
+    if (!opt.mazeMask || walkableAt(opt.mazeMask, w, h, ag.x, ag.y)) {
+      deposited[iy * w + ix] += opt.deposit;
+    }
+  }
+
+  const out = scratchB;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      let n = 0;
+      for (let oy = -1; oy <= 1; oy++) {
+        for (let ox = -1; ox <= 1; ox++) {
+          const xx = (x + ox + w) % w;
+          const yy = (y + oy + h) % h;
+          s += deposited[yy * w + xx];
+          n++;
+        }
+      }
+      const idx = y * w + x;
+      if (opt.mazeMask && opt.mazeMask[idx] !== 1) {
+        out[idx] = 0;
+        continue;
+      }
+      const blur = s / n;
+      const mixed = deposited[idx] * (1 - opt.diffuse) + blur * opt.diffuse;
+      out[idx] = mixed * opt.decay;
+    }
+  }
+  return out;
+}
+
+function stepMazeFlow(field, w, h, opt, scratchA, scratchB) {
+  const a = scratchA;
+  a.set(field);
+  const b = scratchB;
+  const mask = opt.mazeMask;
+  const spread = opt.spread;
+  const decay = opt.decay;
+  const source = opt.source;
+  const maxDist = Math.max(1, Math.hypot(w, h) * 0.6);
+
+  if (opt.source) {
+    const sx = Math.floor(opt.source.x);
+    const sy = Math.floor(opt.source.y);
+    const r = opt.sourceRadius || 3;
+    for (let y = -r; y <= r; y++) {
+      for (let x = -r; x <= r; x++) {
+        if (x * x + y * y > r * r) continue;
+        const xx = sx + x, yy = sy + y;
+        if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+        const idx = yy * w + xx;
+        if (!mask || mask[idx] === 1) a[idx] += opt.inject;
+      }
+    }
+  }
+  if (opt.sink) {
+    const sx = Math.floor(opt.sink.x);
+    const sy = Math.floor(opt.sink.y);
+    const r = opt.sinkRadius || 3;
+    for (let y = -r; y <= r; y++) {
+      for (let x = -r; x <= r; x++) {
+        if (x * x + y * y > r * r) continue;
+        const xx = sx + x, yy = sy + y;
+        if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+        const idx = yy * w + xx;
+        if (!mask || mask[idx] === 1) {
+          a[idx] = Math.max(0, a[idx] - (opt.drain || 0));
+        }
+      }
+    }
+  }
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = y * w + x;
+      if (mask && mask[idx] !== 1) {
+        b[idx] = 0;
+        continue;
+      }
+      const distNorm = source ? Math.min(1, Math.hypot(x - source.x, y - source.y) / maxDist) : 0;
+      const distEase = distNorm * distNorm * (3 - 2 * distNorm);
+      const localSpread = Math.min(
+        opt.maxSpread ?? 0.9,
+        spread + distEase * (opt.spreadBoost || 0)
+      );
+      let s = a[idx];
+      let n = 1;
+      if (x > 0 && (!mask || mask[idx - 1] === 1)) { s += a[idx - 1]; n++; }
+      if (x < w - 1 && (!mask || mask[idx + 1] === 1)) { s += a[idx + 1]; n++; }
+      if (y > 0 && (!mask || mask[idx - w] === 1)) { s += a[idx - w]; n++; }
+      if (y < h - 1 && (!mask || mask[idx + w] === 1)) { s += a[idx + w]; n++; }
+      const avg = s / n;
+      const mixed = a[idx] * (1 - localSpread) + avg * localSpread;
+      b[idx] = Math.max(0, Math.min(opt.maxValue ?? 255, mixed * decay));
+    }
+  }
+  return b;
+}
+
 // ─── Main component ────────────────────────────────────────────
 export default function CellularAutomataDemo() {
   const [running, setRunning] = useState(true);
@@ -185,13 +700,45 @@ export default function CellularAutomataDemo() {
   const [patternBrush, setPatternBrush] = useState(null);
   const [generation, setGeneration] = useState(0);
   const [sheet, setSheet] = useState(null); // "brush" | "patterns" | "rules" | "color" | null
-  const [speedIdx, setSpeedIdx] = useState(1);
+  const [speedIdx, setSpeedIdx] = useState(2);
 
   const [colorPaletteId, setColorPaletteId] = useState(null);
   const [zoom, setZoom] = useState(1);
   const [speedCollapsed, setSpeedCollapsed] = useState(true);
   const [zoomCollapsed, setZoomCollapsed] = useState(true);
   const [hudCollapsed, setHudCollapsed] = useState(false);
+  const [boidCount, setBoidCount] = useState(BOID_DEFAULTS.count);
+  const [boidVision, setBoidVision] = useState(BOID_DEFAULTS.vision);
+  const [boidSeparation, setBoidSeparation] = useState(BOID_DEFAULTS.separation);
+  const [boidAlignment, setBoidAlignment] = useState(BOID_DEFAULTS.alignment);
+  const [boidCohesion, setBoidCohesion] = useState(BOID_DEFAULTS.cohesion);
+  const [boidSteer, setBoidSteer] = useState(BOID_DEFAULTS.steer);
+  const [boidMinSpeed, setBoidMinSpeed] = useState(BOID_DEFAULTS.minSpeed);
+  const [boidMaxSpeed, setBoidMaxSpeed] = useState(BOID_DEFAULTS.maxSpeed);
+  const [boidDrag, setBoidDrag] = useState(BOID_DEFAULTS.drag);
+  const [boidRandomness, setBoidRandomness] = useState(BOID_DEFAULTS.randomness);
+  const [boidBounce, setBoidBounce] = useState(BOID_DEFAULTS.bounce);
+  const [boidColorMode, setBoidColorMode] = useState("classic");
+  const [boidShape, setBoidShape] = useState("dart");
+  const [sharkEnabled, setSharkEnabled] = useState(true);
+  const [slimeCount, setSlimeCount] = useState(9000);
+  const [slimeSensorAngle, setSlimeSensorAngle] = useState(0.52);
+  const [slimeSensorDist, setSlimeSensorDist] = useState(10);
+  const [slimeTurnSpeed, setSlimeTurnSpeed] = useState(0.42);
+  const [slimeSpeed, setSlimeSpeed] = useState(1.3);
+  const [slimeDeposit, setSlimeDeposit] = useState(1.25);
+  const [slimeDecay, setSlimeDecay] = useState(0.965);
+  const [slimeDiffuse, setSlimeDiffuse] = useState(0.28);
+  const [slimeWiggle, setSlimeWiggle] = useState(0.05);
+  const [slimeMazeMode, setSlimeMazeMode] = useState(true);
+  const [slimeMazeLevel, setSlimeMazeLevel] = useState("medium");
+  const [slimeSolverType, setSlimeSolverType] = useState("flow");
+  const [slimeEscaped, setSlimeEscaped] = useState(false);
+  const [slimeFillPct, setSlimeFillPct] = useState(0);
+  const [slimeCheckpointPct, setSlimeCheckpointPct] = useState(70);
+  const [slimeRestartPct, setSlimeRestartPct] = useState(96);
+  const [slimeAutoLoop, setSlimeAutoLoop] = useState(false);
+  const [slimeCheckpointReady, setSlimeCheckpointReady] = useState(false);
 
   const SPEED_LABELS = ["⅓×", "1×", "2×", "4×"];
   const ZOOM_OPTIONS = [
@@ -205,19 +752,169 @@ export default function CellularAutomataDemo() {
 
   const canvasRef = useRef(null);
   const gridRef = useRef(makeRandomGrid("brian"));
+  const boidsRef = useRef(makeBoids(boidCount, GRID_COLS * CELL, GRID_ROWS * CELL, boidShape));
+  const slimeAgentsRef = useRef([]);
+  const slimeFieldRef = useRef(new Float32Array(0));
+  const slimeSizeRef = useRef({ w: 0, h: 0 });
+  const slimeScratchRef = useRef({ a: new Float32Array(0), b: new Float32Array(0) });
+  const slimeImageRef = useRef({ w: 0, h: 0, image: null });
+  const slimeMazeRef = useRef({ mask: null, entryPx: null, exitPx: null });
+  const slimeCheckpointRef = useRef(null);
+  const slimeLoopCooldownRef = useRef(0);
+  const slimeUiTickRef = useRef(0);
+  const slimeFillRef = useRef(0);
+  const flowPhaseRef = useRef(0);
   const drawingRef = useRef(false);
   const colorRef = useRef(null); // null = classic | colors array
   const zoomRef = useRef(1);    // mirror of zoom state for use inside closures
   const speedPressRef = useRef(null);
   const zoomPressRef = useRef(null);
+  const mouseRef = useRef({ active: false, x: 0, y: 0, strength: 0, radius: 120 });
+  const explosionRef = useRef({ active: false, x: 0, y: 0, radius: 0, power: 0, ttl: 0 });
+  const sharkRef = useRef({ active: true, x: 180, y: 180, vx: 1.9, vy: 0.4, fearRadius: 150, fearStrength: 1.2 });
 
-  const SPEEDS = [240, 90, 45, 22];
-  const tickMs = SPEEDS[speedIdx];
+  const LIFE_SPEEDS = [240, 90, 45, 22];
+  const BOID_SPEEDS = [60, 24, 12, 6];
+  const FLOW_SPEEDS = [24, 12, 8, 5];
+  const tickMs = mode === "boids"
+    ? BOID_SPEEDS[speedIdx]
+    : (mode === "slime" && slimeSolverType === "flow")
+      ? FLOW_SPEEDS[speedIdx]
+      : LIFE_SPEEDS[speedIdx];
+
+  function resetSlimeWorld(randomMaze = slimeMazeMode) {
+    const cv = canvasRef.current;
+    const w = cv?.width || GRID_COLS * CELL;
+    const h = cv?.height || GRID_ROWS * CELL;
+    slimeSizeRef.current = { w, h };
+    slimeFieldRef.current = makeTrailField(w, h);
+    slimeScratchRef.current = { a: new Float32Array(w * h), b: new Float32Array(w * h) };
+    slimeImageRef.current = { w: 0, h: 0, image: null };
+    if (randomMaze) {
+      const cfg = SLIME_MAZE_LEVELS[slimeMazeLevel] ?? SLIME_MAZE_LEVELS.medium;
+      const maze = generateMazeWorld(w, h, cfg.cellSize, cfg.wallThickness);
+      slimeMazeRef.current = maze;
+      slimeAgentsRef.current = makeSlimeAgentsAt(slimeCount, maze.entryPx.x, maze.entryPx.y, 10, w, h);
+    } else {
+      slimeMazeRef.current = { mask: null, entryPx: null, exitPx: null };
+      slimeAgentsRef.current = makeSlimeAgents(slimeCount, w, h);
+    }
+    setSlimeEscaped(false);
+    setSlimeFillPct(0);
+    slimeCheckpointRef.current = null;
+    setSlimeCheckpointReady(false);
+    slimeLoopCooldownRef.current = 0;
+  }
+
+  function saveSlimeCheckpointNow() {
+    slimeCheckpointRef.current = {
+      field: new Float32Array(slimeFieldRef.current),
+      agents: slimeAgentsRef.current.map((a) => ({ ...a })),
+      escaped: slimeEscaped,
+    };
+    setSlimeCheckpointReady(true);
+  }
+
+  function replaySlimeCheckpoint() {
+    const cp = slimeCheckpointRef.current;
+    if (!cp) return;
+    slimeFieldRef.current = new Float32Array(cp.field);
+    slimeAgentsRef.current = cp.agents.map((a) => ({ ...a }));
+    setSlimeEscaped(cp.escaped);
+    slimeLoopCooldownRef.current = 24;
+    draw(gridRef.current);
+  }
 
   function draw(g) {
     const cv = canvasRef.current;
     if (!cv) return;
     const ctx = cv.getContext("2d");
+    if (mode === "boids") {
+      ctx.fillStyle = "#0b1220";
+      ctx.fillRect(0, 0, cv.width, cv.height);
+      for (const b of boidsRef.current) {
+        const a = Math.atan2(b.vy, b.vx);
+        const speed = Math.hypot(b.vx, b.vy);
+        let fill = "#38bdf8";
+        if (boidColorMode === "speed") {
+          const t = Math.min(1, Math.max(0, (speed - boidMinSpeed) / Math.max(0.001, boidMaxSpeed - boidMinSpeed)));
+          fill = samplePalette(colorRef.current, t) || `hsl(${210 - t * 210} 95% 58%)`;
+        } else if (boidColorMode === "density") {
+          const t = Math.min(1, Math.max(0, b.localDensity || 0));
+          fill = samplePalette(colorRef.current, t) || `hsl(${200 - t * 150} 90% ${60 - t * 18}%)`;
+        } else if (boidColorMode === "turn") {
+          const t = Math.min(1, (b.turn || 0) / 0.35);
+          fill = samplePalette(colorRef.current, t) || `hsl(${190 + t * 120} 90% ${58 - t * 10}%)`;
+        } else {
+          fill = samplePalette(colorRef.current, 0.45) || "#38bdf8";
+        }
+        ctx.save();
+        ctx.translate(b.x, b.y);
+        ctx.rotate(a);
+        ctx.fillStyle = fill;
+        drawBoidShape(ctx, b.shape || "dart");
+        ctx.restore();
+      }
+      if (sharkEnabled && sharkRef.current.active) {
+        const s = sharkRef.current;
+        const a = Math.atan2(s.vy, s.vx);
+        ctx.save();
+        ctx.translate(s.x, s.y);
+        ctx.rotate(a);
+        ctx.fillStyle = "#e2e8f0";
+        drawBoidShape(ctx, "shark");
+        ctx.restore();
+      }
+      return;
+    }
+    if (mode === "slime") {
+      const w = cv.width;
+      const h = cv.height;
+      if (slimeSizeRef.current.w !== w || slimeSizeRef.current.h !== h || slimeFieldRef.current.length !== w * h) {
+        resetSlimeWorld(slimeMazeMode);
+      }
+      if (!slimeImageRef.current.image || slimeImageRef.current.w !== w || slimeImageRef.current.h !== h) {
+        slimeImageRef.current = { w, h, image: ctx.createImageData(w, h) };
+      }
+      const img = slimeImageRef.current.image;
+      const src = slimeFieldRef.current;
+      const mazeMask = slimeMazeRef.current.mask;
+      const paletteRgb = (colorRef.current || []).map(hexToRgb);
+      for (let i = 0; i < src.length; i++) {
+        if (mazeMask && mazeMask[i] !== 1) {
+          img.data[i * 4] = 34;
+          img.data[i * 4 + 1] = 38;
+          img.data[i * 4 + 2] = 48;
+          img.data[i * 4 + 3] = 255;
+          continue;
+        }
+        const tScale = slimeSolverType === "flow" ? 2.2 : 6.5;
+        const t = Math.min(1, src[i] / tScale);
+        const pIdx = Math.round(Math.max(0, Math.min(1, t)) * Math.max(0, paletteRgb.length - 1));
+        const c = paletteRgb[pIdx] || null;
+        const p = i * 4;
+        if (c) {
+          img.data[p] = c.r;
+          img.data[p + 1] = c.g;
+          img.data[p + 2] = c.b;
+        } else {
+          img.data[p] = 15;
+          img.data[p + 1] = Math.floor(220 * t);
+          img.data[p + 2] = Math.floor(255 * t);
+        }
+        img.data[p + 3] = Math.min(255, Math.floor(30 + t * 225));
+      }
+      ctx.putImageData(img, 0, 0);
+      if (slimeMazeMode && slimeMazeRef.current.exitPx) {
+        const ex = slimeMazeRef.current.exitPx.x;
+        const ey = slimeMazeRef.current.exitPx.y;
+        ctx.fillStyle = slimeEscaped ? "#22c55e" : "#f59e0b";
+        ctx.beginPath();
+        ctx.arc(ex, ey, 6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      return;
+    }
     const { visRows, visCols, rowOff, colOff } = getViewport(zoomRef.current);
     ctx.fillStyle = "#0f172a";
     ctx.fillRect(0, 0, cv.width, cv.height);
@@ -237,14 +934,164 @@ export default function CellularAutomataDemo() {
     draw(gridRef.current);
     const t = setInterval(() => {
       if (!running) return;
-      gridRef.current = mode === "conway"
-        ? stepLife(gridRef.current, birth, survive)
-        : stepBrain(gridRef.current);
+      const subSteps = mode === "slime" && slimeSolverType === "flow" ? 1 : 4;
+      for (let step = 0; step < subSteps; step++) {
+        if (mode === "boids") {
+          const cv = canvasRef.current;
+          if (!cv) return;
+          if (sharkEnabled) {
+            sharkRef.current.active = true;
+            sharkRef.current.x += sharkRef.current.vx;
+            sharkRef.current.y += sharkRef.current.vy;
+            if (sharkRef.current.x < 0 || sharkRef.current.x > cv.width) {
+              sharkRef.current.vx *= -1;
+              sharkRef.current.x = Math.max(0, Math.min(cv.width, sharkRef.current.x));
+            }
+            if (sharkRef.current.y < 0 || sharkRef.current.y > cv.height) {
+              sharkRef.current.vy *= -1;
+              sharkRef.current.y = Math.max(0, Math.min(cv.height, sharkRef.current.y));
+            }
+            sharkRef.current.vx += rand(-0.06, 0.06);
+            sharkRef.current.vy += rand(-0.06, 0.06);
+            const sm = Math.hypot(sharkRef.current.vx, sharkRef.current.vy) || 1;
+            const target = 2.4;
+            sharkRef.current.vx = (sharkRef.current.vx / sm) * target;
+            sharkRef.current.vy = (sharkRef.current.vy / sm) * target;
+          } else {
+            sharkRef.current.active = false;
+          }
+          if (explosionRef.current.active) {
+            explosionRef.current.ttl -= 1;
+            explosionRef.current.radius *= 0.95;
+            explosionRef.current.power *= 0.92;
+            if (explosionRef.current.ttl <= 0 || explosionRef.current.power < 0.03) {
+              explosionRef.current.active = false;
+            }
+          }
+          boidsRef.current = stepBoids(
+            boidsRef.current,
+            {
+              separation: boidSeparation,
+              alignment: boidAlignment,
+              cohesion: boidCohesion,
+              steer: boidSteer,
+              vision: boidVision,
+              minSpeed: boidMinSpeed,
+              maxSpeed: boidMaxSpeed,
+              drag: boidDrag,
+              randomness: boidRandomness,
+              bounce: boidBounce,
+            },
+            cv.width,
+            cv.height,
+            mouseRef.current,
+            explosionRef.current,
+            sharkRef.current
+          );
+        } else if (mode === "slime") {
+          const cv = canvasRef.current;
+          if (!cv) return;
+          const w = cv.width;
+          const h = cv.height;
+          if (slimeSizeRef.current.w !== w || slimeSizeRef.current.h !== h || slimeFieldRef.current.length !== w * h) {
+            resetSlimeWorld(slimeMazeMode);
+          }
+          const mazeMask = slimeMazeMode ? slimeMazeRef.current.mask : null;
+          if (slimeMazeMode && slimeSolverType === "flow") {
+            const flowIters = 60;
+            flowPhaseRef.current += 0.045;
+            const pulse = 0.62 + 0.38 * (0.5 + 0.5 * Math.sin(flowPhaseRef.current));
+            const flowInject = (1500 * pulse) / flowIters;
+            const flowDrain = 4.2 + 2.4 * (1 - pulse);
+            for (let fi = 0; fi < flowIters; fi++) {
+              slimeFieldRef.current = stepMazeFlow(slimeFieldRef.current, w, h, {
+                mazeMask,
+                source: slimeMazeRef.current.entryPx,
+                sourceRadius: 4,
+                sink: slimeMazeRef.current.exitPx,
+                sinkRadius: 3,
+                drain: flowDrain,
+                inject: flowInject,
+                spread: 0.28,
+                spreadBoost: 0.18,
+                maxSpread: 0.46,
+                decay: 0.9988,
+                maxValue: 900,
+              }, slimeScratchRef.current.a, slimeScratchRef.current.b);
+              const s2 = slimeScratchRef.current;
+              slimeScratchRef.current = { a: s2.b, b: s2.a };
+            }
+          } else {
+            const stepped = stepSlime(slimeAgentsRef.current, slimeFieldRef.current, w, h, {
+              sensorAngle: slimeSensorAngle,
+              sensorDist: slimeSensorDist,
+              turnSpeed: slimeTurnSpeed,
+              speed: slimeSpeed,
+              deposit: slimeDeposit,
+              decay: slimeDecay,
+              diffuse: slimeDiffuse,
+              wiggle: slimeWiggle,
+              mazeMask,
+            }, slimeScratchRef.current.a, slimeScratchRef.current.b);
+            slimeFieldRef.current = stepped;
+          }
+          if (!(slimeMazeMode && slimeSolverType === "flow")) {
+            const s = slimeScratchRef.current;
+            slimeScratchRef.current = { a: s.b, b: s.a };
+          }
+          if (slimeMazeMode && mazeMask) {
+            if (slimeLoopCooldownRef.current > 0) slimeLoopCooldownRef.current -= 1;
+            slimeUiTickRef.current += 1;
+            if (slimeUiTickRef.current % 12 === 0) {
+              let covered = 0;
+              let total = 0;
+              for (let i = 0; i < mazeMask.length; i++) {
+                if (mazeMask[i] === 1) {
+                  total++;
+                  if (slimeFieldRef.current[i] > 0.85) covered++;
+                }
+              }
+              const fill = total > 0 ? (covered / total) * 100 : 0;
+              slimeFillRef.current = fill;
+              setSlimeFillPct(fill);
+            }
+            const fillForLogic = slimeFillRef.current;
+            if (!slimeCheckpointRef.current && fillForLogic >= slimeCheckpointPct) {
+              saveSlimeCheckpointNow();
+            }
+            if (slimeAutoLoop && slimeCheckpointRef.current && slimeLoopCooldownRef.current === 0 && fillForLogic >= slimeRestartPct) {
+              replaySlimeCheckpoint();
+            }
+          }
+          if (slimeMazeMode && slimeMazeRef.current.exitPx && !slimeEscaped) {
+            const ex = slimeMazeRef.current.exitPx.x;
+            const ey = slimeMazeRef.current.exitPx.y;
+            let hit = false;
+            if (slimeSolverType === "flow") {
+              const ix = Math.floor(ex);
+              const iy = Math.floor(ey);
+              const idx = iy * w + ix;
+              hit = (slimeFieldRef.current[idx] || 0) > 1.1;
+            } else {
+              hit = slimeAgentsRef.current.some((ag) => {
+                const dx = ag.x - ex;
+                const dy = ag.y - ey;
+                return dx * dx + dy * dy < 64;
+              });
+            }
+            if (hit) setSlimeEscaped(true);
+          }
+        } else {
+          gridRef.current = mode === "conway"
+            ? stepLife(gridRef.current, birth, survive)
+            : stepBrain(gridRef.current);
+        }
+      }
       draw(gridRef.current);
-      setGeneration((g) => g + 1);
+      setGeneration((g) => g + subSteps);
     }, tickMs);
     return () => clearInterval(t);
-  }, [running, mode, birth, survive, tickMs]);
+  }, [running, mode, birth, survive, tickMs, boidSeparation, boidAlignment, boidCohesion, boidSteer, boidVision, boidMinSpeed, boidMaxSpeed, boidDrag, boidRandomness, boidBounce, boidColorMode, sharkEnabled, slimeCount, slimeSensorAngle, slimeSensorDist, slimeTurnSpeed, slimeSpeed, slimeDeposit, slimeDecay, slimeDiffuse, slimeWiggle, slimeMazeMode, slimeSolverType, slimeEscaped]);
 
   // Redraw immediately when zoom changes (canvas dims reset, need sync redraw)
   useLayoutEffect(() => {
@@ -252,13 +1099,43 @@ export default function CellularAutomataDemo() {
     draw(gridRef.current);
   }, [zoom]);
 
+  useEffect(() => {
+    if (mode !== "slime") return;
+    resetSlimeWorld(slimeMazeMode);
+    draw(gridRef.current);
+  }, [mode, slimeMazeMode, slimeMazeLevel, slimeSolverType]);
+
+  useEffect(() => {
+    if (slimeRestartPct < slimeCheckpointPct) setSlimeRestartPct(slimeCheckpointPct);
+  }, [slimeCheckpointPct, slimeRestartPct]);
+
   function randomize() {
-    gridRef.current = makeRandomGrid(mode);
+    if (mode === "boids") {
+      const cv = canvasRef.current;
+      boidsRef.current = makeBoids(boidCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, boidShape);
+    } else if (mode === "slime") {
+      resetSlimeWorld(slimeMazeMode);
+    } else {
+      gridRef.current = makeRandomGrid(mode);
+    }
     draw(gridRef.current);
     setGeneration(0);
   }
   function clearGrid() {
-    gridRef.current = Array.from({ length: GRID_ROWS }, () => Array(GRID_COLS).fill(OFF));
+    if (mode === "boids") {
+      boidsRef.current = [];
+    } else if (mode === "slime") {
+      const cv = canvasRef.current;
+      const w = cv?.width || GRID_COLS * CELL;
+      const h = cv?.height || GRID_ROWS * CELL;
+      slimeSizeRef.current = { w, h };
+      slimeFieldRef.current = makeTrailField(w, h);
+      slimeAgentsRef.current = [];
+      slimeMazeRef.current = { mask: null, entryPx: null, exitPx: null };
+      setSlimeEscaped(false);
+    } else {
+      gridRef.current = Array.from({ length: GRID_ROWS }, () => Array(GRID_COLS).fill(OFF));
+    }
     draw(gridRef.current);
     setGeneration(0);
   }
@@ -280,6 +1157,7 @@ export default function CellularAutomataDemo() {
   }
 
   function paintAt(clientX, clientY) {
+    if (mode === "boids") return;
     const cv = canvasRef.current;
     if (!cv) return;
     const rect = cv.getBoundingClientRect();
@@ -341,9 +1219,16 @@ export default function CellularAutomataDemo() {
   }
 
   function toggleMode() {
-    const nm = mode === "conway" ? "brian" : "conway";
+    const nm = MODE_ORDER[(MODE_ORDER.indexOf(mode) + 1) % MODE_ORDER.length];
     setMode(nm);
-    gridRef.current = makeRandomGrid(nm);
+    if (nm === "boids") {
+      const cv = canvasRef.current;
+      boidsRef.current = makeBoids(boidCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, boidShape);
+    } else if (nm === "slime") {
+      resetSlimeWorld(slimeMazeMode);
+    } else {
+      gridRef.current = makeRandomGrid(nm);
+    }
     draw(gridRef.current);
     setGeneration(0);
   }
@@ -354,11 +1239,34 @@ export default function CellularAutomataDemo() {
     setSurvive(p.survive);
   }
 
+  function resetBoidsDefaults() {
+    setBoidCount(BOID_DEFAULTS.count);
+    setBoidVision(BOID_DEFAULTS.vision);
+    setBoidSeparation(BOID_DEFAULTS.separation);
+    setBoidAlignment(BOID_DEFAULTS.alignment);
+    setBoidCohesion(BOID_DEFAULTS.cohesion);
+    setBoidSteer(BOID_DEFAULTS.steer);
+    setBoidMinSpeed(BOID_DEFAULTS.minSpeed);
+    setBoidMaxSpeed(BOID_DEFAULTS.maxSpeed);
+    setBoidDrag(BOID_DEFAULTS.drag);
+    setBoidRandomness(BOID_DEFAULTS.randomness);
+    setBoidBounce(BOID_DEFAULTS.bounce);
+    setBoidShape("dart");
+    const cv = canvasRef.current;
+    boidsRef.current = makeBoids(BOID_DEFAULTS.count, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, "dart");
+    draw(gridRef.current);
+    setGeneration(0);
+  }
+
   const ruleString = mode === "brian"
     ? "Brian's Brain"
-    : `B${birth.join("") || "—"}/S${survive.join("") || "—"}`;
+    : mode === "boids"
+      ? "Separation · Alignment · Cohesion"
+      : mode === "slime"
+        ? "Physarum Agents"
+      : `B${birth.join("") || "—"}/S${survive.join("") || "—"}`;
 
-  const cat = CATALOG[mode];
+  const cat = CATALOG[mode] ?? [];
 
   // Canvas dimensions match the visible viewport in pixels
   const { visRows, visCols } = getViewport(zoom);
@@ -372,12 +1280,69 @@ export default function CellularAutomataDemo() {
         ref={canvasRef}
         width={canvasW}
         height={canvasH}
-        onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); drawingRef.current = true; paintAt(e.clientX, e.clientY); }}
-        onPointerMove={(e) => { if (drawingRef.current && !patternBrush) paintAt(e.clientX, e.clientY); }}
-        onPointerUp={() => { drawingRef.current = false; }}
-        onPointerCancel={() => { drawingRef.current = false; }}
+        onContextMenu={(e) => e.preventDefault()}
+        onPointerDown={(e) => {
+          e.currentTarget.setPointerCapture(e.pointerId);
+          drawingRef.current = true;
+          if (mode === "boids") {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const sx = e.currentTarget.width / rect.width;
+            const sy = e.currentTarget.height / rect.height;
+            mouseRef.current = {
+              active: true,
+              x: (e.clientX - rect.left) * sx,
+              y: (e.clientY - rect.top) * sy,
+              strength: e.button === 2 ? -0.12 : 0.12,
+              radius: 120,
+            };
+          } else if (mode === "slime") {
+            const cv = canvasRef.current;
+            if (cv) {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const sx = e.currentTarget.width / rect.width;
+              const sy = e.currentTarget.height / rect.height;
+              const x = Math.floor((e.clientX - rect.left) * sx);
+              const y = Math.floor((e.clientY - rect.top) * sy);
+              if (x >= 0 && y >= 0 && x < cv.width && y < cv.height) {
+                const idx = y * cv.width + x;
+                const mask = slimeMazeRef.current.mask;
+                if ((!mask || mask[idx] === 1) && slimeFieldRef.current[idx] !== undefined) slimeFieldRef.current[idx] += 16;
+              }
+            }
+          } else {
+            paintAt(e.clientX, e.clientY);
+          }
+        }}
+        onPointerMove={(e) => {
+          if (!drawingRef.current) return;
+          if (mode === "boids") {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const sx = e.currentTarget.width / rect.width;
+            const sy = e.currentTarget.height / rect.height;
+            mouseRef.current.x = (e.clientX - rect.left) * sx;
+            mouseRef.current.y = (e.clientY - rect.top) * sy;
+          } else if (mode !== "slime" && !patternBrush) {
+            paintAt(e.clientX, e.clientY);
+          }
+        }}
+        onDoubleClick={(e) => {
+          if (mode !== "boids") return;
+          const rect = e.currentTarget.getBoundingClientRect();
+          const sx = e.currentTarget.width / rect.width;
+          const sy = e.currentTarget.height / rect.height;
+          explosionRef.current = {
+            active: true,
+            x: (e.clientX - rect.left) * sx,
+            y: (e.clientY - rect.top) * sy,
+            radius: 180,
+            power: 2.8,
+            ttl: 26,
+          };
+        }}
+        onPointerUp={() => { drawingRef.current = false; mouseRef.current.active = false; }}
+        onPointerCancel={() => { drawingRef.current = false; mouseRef.current.active = false; }}
         className="absolute inset-0 w-full h-full touch-none"
-        style={{ cursor: patternBrush ? "copy" : "crosshair", imageRendering: "pixelated" }}
+        style={{ cursor: mode === "boids" ? "grab" : mode === "slime" ? "cell" : (patternBrush ? "copy" : "crosshair"), imageRendering: "pixelated" }}
       />
 
       {/* ─── Protection gradients ─── */}
@@ -396,9 +1361,9 @@ export default function CellularAutomataDemo() {
             boxShadow: `0 0 8px ${mode === "brian" ? "#7c3aed" : "#38bdf8"}`,
           }}
         />
-        <span className="text-xs font-bold tracking-wider">{mode === "brian" ? "BRAIN" : "LIFE"}</span>
+        <span className="text-xs font-bold tracking-wider">{mode === "brian" ? "BRAIN" : mode === "conway" ? "LIFE" : mode === "boids" ? "BOIDS" : "SLIME"}</span>
         <span className="text-[11px] text-slate-400 font-mono pl-2 ml-1 border-l border-white/10">
-          {mode === "brian" ? "·" : `${birth.join("")||"—"}/${survive.join("")||"—"}`}
+          {mode === "brian" ? "·" : mode === "boids" ? "SAC" : mode === "slime" ? "PHYS" : `${birth.join("")||"—"}/${survive.join("")||"—"}`}
         </span>
       </button>
 
@@ -482,7 +1447,7 @@ export default function CellularAutomataDemo() {
       </div>
 
       {/* ─── Pattern brush badge ─── */}
-      {patternBrush && !sheet && (
+      {patternBrush && mode !== "boids" && mode !== "slime" && !sheet && (
         <div className="absolute left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-violet-600/85 backdrop-blur-xl border border-white/15 shadow-lg shadow-violet-600/40" style={{ top: "max(env(safe-area-inset-top), 12px)" }}>
           <span className="text-xs font-bold">● Tap to place {patternBrush}</span>
           <button
@@ -509,9 +1474,9 @@ export default function CellularAutomataDemo() {
             <div className="flex items-center gap-1.5 p-2 rounded-[36px] bg-slate-900/80 backdrop-blur-2xl border border-white/10 shadow-2xl shadow-black/50">
               <HudIcon onClick={clearGrid} title="Clear"><TrashIcon /></HudIcon>
               <HudIcon onClick={randomize} title="Randomize"><DiceIcon /></HudIcon>
-              <HudIcon onClick={() => setSheet("brush")} title="Brush"
+              {mode !== "boids" && mode !== "slime" && <HudIcon onClick={() => setSheet("brush")} title="Brush"
                 active={sheet === "brush"} activeColor={brushColor(brush)}
-              ><BrushIcon /></HudIcon>
+              ><BrushIcon /></HudIcon>}
               <button
                 onClick={() => setRunning(!running)}
                 className={`w-[54px] h-[54px] rounded-full flex items-center justify-center text-white active:scale-95 transition shadow-lg ${
@@ -521,9 +1486,9 @@ export default function CellularAutomataDemo() {
               >
                 {running ? <PauseIcon /> : <PlayIcon />}
               </button>
-              <HudIcon onClick={() => setSheet("patterns")} title="Patterns"
+              {mode !== "boids" && mode !== "slime" && <HudIcon onClick={() => setSheet("patterns")} title="Patterns"
                 active={sheet === "patterns"} activeColor="bg-violet-600"
-              ><PatternsIcon /></HudIcon>
+              ><PatternsIcon /></HudIcon>}
               <HudIcon onClick={() => setSheet("rules")} title="Rules"
                 active={sheet === "rules"} activeColor="bg-yellow-600"
               ><SlidersIcon /></HudIcon>
@@ -572,11 +1537,54 @@ export default function CellularAutomataDemo() {
                 mode={mode} preset={preset} applyPreset={applyPreset}
                 birth={birth} setBirth={setBirth}
                 survive={survive} setSurvive={setSurvive}
+                boidCount={boidCount} setBoidCount={setBoidCount}
+                boidVision={boidVision} setBoidVision={setBoidVision}
+                boidSeparation={boidSeparation} setBoidSeparation={setBoidSeparation}
+                boidAlignment={boidAlignment} setBoidAlignment={setBoidAlignment}
+                boidCohesion={boidCohesion} setBoidCohesion={setBoidCohesion}
+                boidSteer={boidSteer} setBoidSteer={setBoidSteer}
+                boidMinSpeed={boidMinSpeed} setBoidMinSpeed={setBoidMinSpeed}
+                boidMaxSpeed={boidMaxSpeed} setBoidMaxSpeed={setBoidMaxSpeed}
+                boidDrag={boidDrag} setBoidDrag={setBoidDrag}
+                boidRandomness={boidRandomness} setBoidRandomness={setBoidRandomness}
+                boidBounce={boidBounce} setBoidBounce={setBoidBounce}
+                boidShape={boidShape} setBoidShape={setBoidShape}
+                sharkEnabled={sharkEnabled} setSharkEnabled={setSharkEnabled}
+                slimeCount={slimeCount} setSlimeCount={setSlimeCount}
+                slimeSensorAngle={slimeSensorAngle} setSlimeSensorAngle={setSlimeSensorAngle}
+                slimeSensorDist={slimeSensorDist} setSlimeSensorDist={setSlimeSensorDist}
+                slimeTurnSpeed={slimeTurnSpeed} setSlimeTurnSpeed={setSlimeTurnSpeed}
+                slimeSpeed={slimeSpeed} setSlimeSpeed={setSlimeSpeed}
+                slimeDeposit={slimeDeposit} setSlimeDeposit={setSlimeDeposit}
+                slimeDecay={slimeDecay} setSlimeDecay={setSlimeDecay}
+                slimeDiffuse={slimeDiffuse} setSlimeDiffuse={setSlimeDiffuse}
+                slimeWiggle={slimeWiggle} setSlimeWiggle={setSlimeWiggle}
+                slimeMazeMode={slimeMazeMode} setSlimeMazeMode={setSlimeMazeMode}
+                slimeMazeLevel={slimeMazeLevel} setSlimeMazeLevel={setSlimeMazeLevel}
+                slimeSolverType={slimeSolverType} setSlimeSolverType={setSlimeSolverType}
+                slimeEscaped={slimeEscaped}
+                slimeFillPct={slimeFillPct}
+                slimeCheckpointPct={slimeCheckpointPct} setSlimeCheckpointPct={setSlimeCheckpointPct}
+                slimeRestartPct={slimeRestartPct} setSlimeRestartPct={setSlimeRestartPct}
+                slimeAutoLoop={slimeAutoLoop} setSlimeAutoLoop={setSlimeAutoLoop}
+                slimeCheckpointReady={slimeCheckpointReady}
+                saveSlimeCheckpointNow={saveSlimeCheckpointNow}
+                replaySlimeCheckpoint={replaySlimeCheckpoint}
+                regenerateSlimeMaze={() => { resetSlimeWorld(true); draw(gridRef.current); }}
+                onResetBoids={resetBoidsDefaults}
+                reinitBoids={() => {
+                  const cv = canvasRef.current;
+                  boidsRef.current = makeBoids(boidCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, boidShape);
+                  draw(gridRef.current);
+                }}
                 onClose={() => setSheet(null)}
               />
             )}
             {sheet === "color" && (
               <ColorSheet
+                mode={mode}
+                boidColorMode={boidColorMode}
+                setBoidColorMode={setBoidColorMode}
                 colorPaletteId={colorPaletteId}
                 selectPalette={(p) => { selectPalette(p); setSheet(null); }}
                 onClose={() => setSheet(null)}
@@ -732,7 +1740,21 @@ function PatternThumb({ pattern, color, active }) {
   );
 }
 
-function RulesSheet({ mode, preset, applyPreset, birth, setBirth, survive, setSurvive, onClose }) {
+function RulesSheet({
+  mode, preset, applyPreset, birth, setBirth, survive, setSurvive,
+  boidCount, setBoidCount, boidVision, setBoidVision, boidSeparation, setBoidSeparation,
+  boidAlignment, setBoidAlignment, boidCohesion, setBoidCohesion, boidSteer, setBoidSteer,
+  boidMinSpeed, setBoidMinSpeed, boidMaxSpeed, setBoidMaxSpeed, boidDrag, setBoidDrag,
+  boidRandomness, setBoidRandomness, boidBounce, setBoidBounce,
+  boidShape, setBoidShape, sharkEnabled, setSharkEnabled,
+  slimeCount, setSlimeCount, slimeSensorAngle, setSlimeSensorAngle, slimeSensorDist, setSlimeSensorDist,
+  slimeTurnSpeed, setSlimeTurnSpeed, slimeSpeed, setSlimeSpeed, slimeDeposit, setSlimeDeposit,
+  slimeDecay, setSlimeDecay, slimeDiffuse, setSlimeDiffuse, slimeWiggle, setSlimeWiggle,
+  slimeMazeMode, setSlimeMazeMode, slimeMazeLevel, setSlimeMazeLevel, slimeSolverType, setSlimeSolverType, slimeEscaped, slimeFillPct,
+  slimeCheckpointPct, setSlimeCheckpointPct, slimeRestartPct, setSlimeRestartPct,
+  slimeAutoLoop, setSlimeAutoLoop, slimeCheckpointReady, saveSlimeCheckpointNow, replaySlimeCheckpoint, regenerateSlimeMaze,
+  onResetBoids, reinitBoids, onClose,
+}) {
   return (
     <div>
       <SheetHeader title="Rules" onClose={onClose} />
@@ -778,12 +1800,164 @@ function RulesSheet({ mode, preset, applyPreset, birth, setBirth, survive, setSu
             ))}
           </div>
         </>
-      ) : (
+      ) : mode === "brian" ? (
         <div className="p-3.5 rounded-2xl bg-slate-800 text-slate-300 text-xs leading-relaxed">
           <div className="text-white font-bold mb-1.5 text-[13px]">Brian's Brain</div>
           Fixed 3-state rule. To edit B/S rules, switch to <span className="text-sky-400 font-bold">Life</span> mode using the chip at top-left.
         </div>
+      ) : mode === "boids" ? (
+        <div className="space-y-3">
+          <button
+            onClick={onResetBoids}
+            className="w-full py-2 rounded-xl bg-slate-700 text-xs font-semibold text-white active:scale-95 transition"
+          >Reset Boids Defaults</button>
+          <button
+            onClick={() => setSharkEnabled(!sharkEnabled)}
+            className={`w-full py-2 rounded-xl text-xs font-semibold active:scale-95 transition ${
+              sharkEnabled ? "bg-slate-100 text-slate-900" : "bg-slate-800 text-slate-200"
+            }`}
+          >{sharkEnabled ? "Shark: On" : "Shark: Off"}</button>
+          <div>
+            <div className="text-[11px] text-slate-500 uppercase tracking-widest font-bold mb-2">Shapes</div>
+            <div className="grid grid-cols-2 gap-1.5">
+              {BOID_SHAPES.map((s) => (
+                <button
+                  key={`shape-${s.id}`}
+                  onClick={() => setBoidShape(s.id)}
+                  className={`py-2 rounded-lg text-[11px] font-semibold transition active:scale-95 ${
+                    boidShape === s.id ? "bg-emerald-600 text-white" : "bg-slate-800 text-slate-300"
+                  }`}
+                >{s.label}</button>
+              ))}
+            </div>
+          </div>
+          <RangeRow label="Count" value={boidCount} min={40} max={700} step={10} onChange={setBoidCount} />
+          <button
+            onClick={reinitBoids}
+            className="w-full py-2 rounded-xl bg-slate-800 text-xs font-semibold text-slate-200 active:scale-95 transition"
+          >Apply Count</button>
+          <RangeRow label="Vision" value={boidVision} min={20} max={110} step={1} onChange={setBoidVision} />
+          <RangeRow label="Separation" value={boidSeparation} min={0} max={2} step={0.01} onChange={setBoidSeparation} />
+          <RangeRow label="Alignment" value={boidAlignment} min={0} max={0.3} step={0.002} onChange={setBoidAlignment} />
+          <RangeRow label="Cohesion" value={boidCohesion} min={0} max={0.06} step={0.001} onChange={setBoidCohesion} />
+          <RangeRow label="Steer" value={boidSteer} min={0.02} max={0.5} step={0.005} onChange={setBoidSteer} />
+          <RangeRow label="Min speed" value={boidMinSpeed} min={0.2} max={3} step={0.05} onChange={setBoidMinSpeed} />
+          <RangeRow label="Max speed" value={boidMaxSpeed} min={0.6} max={6} step={0.05} onChange={setBoidMaxSpeed} />
+          <RangeRow label="Drag" value={boidDrag} min={0.93} max={1} step={0.001} onChange={setBoidDrag} />
+          <RangeRow label="Randomness" value={boidRandomness} min={0} max={0.09} step={0.001} onChange={setBoidRandomness} />
+          <button
+            onClick={() => setBoidBounce(!boidBounce)}
+            className={`w-full py-2 rounded-xl text-xs font-semibold active:scale-95 transition ${
+              boidBounce ? "bg-sky-600 text-white" : "bg-slate-800 text-slate-300"
+            }`}
+          >{boidBounce ? "Bounce Edges: On" : "Bounce Edges: Off (Wrap)"}</button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <button
+            onClick={() => setSlimeMazeMode(!slimeMazeMode)}
+            className={`w-full py-2 rounded-xl text-xs font-semibold active:scale-95 transition ${
+              slimeMazeMode ? "bg-amber-500 text-slate-900" : "bg-slate-800 text-slate-200"
+            }`}
+          >{slimeMazeMode ? "Maze Challenge: On" : "Maze Challenge: Off"}</button>
+          {slimeMazeMode && (
+            <>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  onClick={() => setSlimeSolverType("flow")}
+                  className={`py-2 rounded-lg text-[11px] font-semibold transition active:scale-95 ${
+                    slimeSolverType === "flow" ? "bg-cyan-500 text-slate-900" : "bg-slate-800 text-slate-300"
+                  }`}
+                >Water Flow</button>
+                <button
+                  onClick={() => setSlimeSolverType("slime")}
+                  className={`py-2 rounded-lg text-[11px] font-semibold transition active:scale-95 ${
+                    slimeSolverType === "slime" ? "bg-violet-500 text-white" : "bg-slate-800 text-slate-300"
+                  }`}
+                >Slime Agents</button>
+              </div>
+              <div className="grid grid-cols-3 gap-1.5">
+                {Object.entries(SLIME_MAZE_LEVELS).map(([id, cfg]) => (
+                  <button
+                    key={id}
+                    onClick={() => setSlimeMazeLevel(id)}
+                    className={`py-2 rounded-lg text-[11px] font-semibold transition active:scale-95 ${
+                      slimeMazeLevel === id ? "bg-sky-600 text-white" : "bg-slate-800 text-slate-300"
+                    }`}
+                  >{cfg.label}</button>
+                ))}
+              </div>
+              <button
+                onClick={regenerateSlimeMaze}
+                className="w-full py-2 rounded-xl bg-slate-700 text-xs font-semibold text-white active:scale-95 transition"
+              >Generate Maze</button>
+              <div className={`text-[11px] rounded-lg px-2.5 py-2 ${slimeEscaped ? "bg-emerald-500/20 text-emerald-300" : "bg-amber-500/20 text-amber-300"}`}>
+                {slimeEscaped ? "Escaped: reached the exit." : "Goal: reach the amber exit dot."}
+              </div>
+              <div className="text-[11px] rounded-lg px-2.5 py-2 bg-sky-500/20 text-sky-300">
+                Path filled: {slimeFillPct.toFixed(1)}%
+              </div>
+              <RangeRow label="Checkpoint (%)" value={slimeCheckpointPct} min={30} max={95} step={1} onChange={setSlimeCheckpointPct} />
+              <RangeRow label="Loop restart (%)" value={slimeRestartPct} min={50} max={100} step={1} onChange={setSlimeRestartPct} />
+              <button
+                onClick={() => setSlimeAutoLoop(!slimeAutoLoop)}
+                className={`w-full py-2 rounded-xl text-xs font-semibold active:scale-95 transition ${
+                  slimeAutoLoop ? "bg-emerald-500 text-slate-900" : "bg-slate-800 text-slate-200"
+                }`}
+              >{slimeAutoLoop ? "Auto-loop: On" : "Auto-loop: Off"}</button>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  onClick={saveSlimeCheckpointNow}
+                  className="py-2 rounded-lg text-[11px] font-semibold bg-slate-700 text-white active:scale-95 transition"
+                >Save Checkpoint</button>
+                <button
+                  onClick={replaySlimeCheckpoint}
+                  disabled={!slimeCheckpointReady}
+                  className={`py-2 rounded-lg text-[11px] font-semibold active:scale-95 transition ${
+                    slimeCheckpointReady ? "bg-sky-600 text-white" : "bg-slate-800 text-slate-500"
+                  }`}
+                >Replay</button>
+              </div>
+            </>
+          )}
+          {slimeSolverType === "slime" && (
+            <>
+              <RangeRow label="Agents" value={slimeCount} min={500} max={20000} step={500} onChange={setSlimeCount} />
+              <RangeRow label="Sensor angle" value={slimeSensorAngle} min={0.1} max={1.4} step={0.01} onChange={setSlimeSensorAngle} />
+              <RangeRow label="Sensor dist" value={slimeSensorDist} min={2} max={24} step={1} onChange={setSlimeSensorDist} />
+              <RangeRow label="Turn speed" value={slimeTurnSpeed} min={0.05} max={1.2} step={0.01} onChange={setSlimeTurnSpeed} />
+              <RangeRow label="Speed" value={slimeSpeed} min={0.2} max={3} step={0.05} onChange={setSlimeSpeed} />
+              <RangeRow label="Deposit" value={slimeDeposit} min={0.2} max={3} step={0.05} onChange={setSlimeDeposit} />
+            </>
+          )}
+          <RangeRow label="Decay" value={slimeDecay} min={0.9} max={0.999} step={0.001} onChange={setSlimeDecay} />
+          <RangeRow label="Diffuse" value={slimeDiffuse} min={0} max={1} step={0.01} onChange={setSlimeDiffuse} />
+          {slimeSolverType === "slime" && (
+            <RangeRow label="Wiggle" value={slimeWiggle} min={0} max={0.25} step={0.005} onChange={setSlimeWiggle} />
+          )}
+        </div>
       )}
+    </div>
+  );
+}
+
+function RangeRow({ label, value, min, max, step, onChange }) {
+  const pretty = typeof value === "number" && !Number.isInteger(value) ? value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "") : value;
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-[11px] text-slate-400">{label}</span>
+        <span className="text-[11px] font-mono text-slate-200">{pretty}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full accent-sky-500"
+      />
     </div>
   );
 }
@@ -843,10 +2017,26 @@ function PaletteIcon() {
   );
 }
 
-function ColorSheet({ colorPaletteId, selectPalette, onClose }) {
+function ColorSheet({ mode, boidColorMode, setBoidColorMode, colorPaletteId, selectPalette, onClose }) {
   return (
     <div>
       <SheetHeader title="Color Mode" onClose={onClose} />
+      {mode === "boids" && (
+        <div className="mb-3">
+          <div className="text-[11px] text-slate-500 uppercase tracking-widest font-bold mb-2">Boids Metric</div>
+          <div className="grid grid-cols-2 gap-1.5">
+            {BOID_COLOR_MODES.map((m) => (
+              <button
+                key={m.id}
+                onClick={() => setBoidColorMode(m.id)}
+                className={`py-2 rounded-lg text-[11px] font-semibold transition active:scale-95 ${
+                  boidColorMode === m.id ? "bg-sky-600 text-white" : "bg-slate-800 text-slate-300"
+                }`}
+              >{m.label}</button>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="grid grid-cols-3 gap-2">
         <button
           onClick={() => selectPalette(null)}
