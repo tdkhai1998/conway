@@ -23,7 +23,7 @@ const CELL = 5;
 const OFF = 0;
 const ON = 1;
 const DYING = 2;
-const MODE_ORDER = ["brian", "conway", "boids", "slime", "pathfinding"];
+const MODE_ORDER = ["brian", "conway", "boids", "slime", "pathfinding", "nbody"];
 const PATHFINDING_ALGOS = [
   { id: "bfs", label: "BFS" },
   { id: "dfs", label: "DFS" },
@@ -50,6 +50,19 @@ const BOID_DEFAULTS = {
   randomness: 0.018,
   bounce: false,
 };
+const NBODY_DEFAULTS = {
+  count: 160,
+  gravity: 0.42,
+  damping: 0.999,
+  softening: 28,
+  maxSpeed: 4.2,
+};
+const NBODY_PRESETS = [
+  { id: "solar", label: "Solar", count: 6, gravity: 0.34, damping: 0.9992, softening: 26, maxSpeed: 3.6, radiusMin: 0.14, radiusMax: 0.42, jitter: 0.04, centerMass: 320 },
+  { id: "chaotic", label: "Chaotic", count: 8, gravity: 0.58, damping: 0.9975, softening: 20, maxSpeed: 5.8, radiusMin: 0.08, radiusMax: 0.4, jitter: 0.24, centerMass: 220 },
+  { id: "cluster", label: "Dense Cluster", count: 5, gravity: 0.48, damping: 0.9985, softening: 16, maxSpeed: 4.4, radiusMin: 0.04, radiusMax: 0.2, jitter: 0.1, centerMass: 280 },
+];
+const NBODY_COUNTS = [2, 3, 4, 5, 6, 8];
 const BOID_COLOR_MODES = [
   { id: "classic", label: "Classic" },
   { id: "speed", label: "Speed" },
@@ -66,7 +79,7 @@ const BOID_SHAPES = [
 const SLIME_MAZE_LEVELS = {
   easy: { label: "Easy", cellSize: 7, wallThickness: 1 },
   medium: { label: "Medium", cellSize: 6, wallThickness: 2 },
-  hard: { label: "Hard", cellSize: 5, wallThickness: 3 },
+  hard: { label: "Hard", cellSize: 5, wallThickness: 2 },
 };
 
 const PATTERNS = {
@@ -227,18 +240,103 @@ function makeBoids(count, w, h, shape = "dart") {
   return Array.from({ length: count }, () => {
     return {};
   }).map((_, i) => {
-    const a = rand(0, Math.PI * 2);
-    const speed = rand(0.8, 2.2);
-    return {
-      x: rand(0, w),
-      y: rand(0, h),
-      vx: Math.cos(a) * speed,
-      vy: Math.sin(a) * speed,
-      turn: 0,
-      localDensity: 0,
-      shape,
-    };
+    return makeBoidAt(rand(0, w), rand(0, h), shape);
   });
+}
+
+function makeBoidAt(x, y, shape = "dart") {
+  const a = rand(0, Math.PI * 2);
+  const speed = rand(0.8, 2.2);
+  return {
+    x,
+    y,
+    vx: Math.cos(a) * speed,
+    vy: Math.sin(a) * speed,
+    turn: 0,
+    localDensity: 0,
+    shape,
+  };
+}
+
+function makeNBodySystem(count, w, h, config = {}) {
+  const cx = w * 0.5;
+  const cy = h * 0.5;
+  const gravity = config.gravity ?? NBODY_DEFAULTS.gravity;
+  const radiusMin = config.radiusMin ?? 0.08;
+  const radiusMax = config.radiusMax ?? 0.42;
+  const jitter = config.jitter ?? 0.08;
+  const centerMass = config.centerMass ?? 240;
+  const bodies = [{
+    x: cx,
+    y: cy,
+    vx: 0,
+    vy: 0,
+    mass: centerMass,
+    radius: 6,
+    fixed: true,
+  }];
+  const orbiters = Math.max(1, count - 1);
+  for (let i = 0; i < orbiters; i++) {
+    const angle = rand(0, Math.PI * 2);
+    const radius = rand(Math.min(w, h) * radiusMin, Math.min(w, h) * radiusMax);
+    const x = cx + Math.cos(angle) * radius;
+    const y = cy + Math.sin(angle) * radius;
+    const mass = rand(0.8, 3.6);
+    const orbitalSpeed = Math.sqrt(Math.max(0.001, gravity * centerMass / Math.max(radius, 18))) * 3.6;
+    const tangent = angle + Math.PI / 2;
+    bodies.push({
+      x,
+      y,
+      vx: Math.cos(tangent) * orbitalSpeed + rand(-jitter, jitter),
+      vy: Math.sin(tangent) * orbitalSpeed + rand(-jitter, jitter),
+      mass,
+      radius: Math.max(1.4, Math.min(3.6, Math.sqrt(mass) * 1.2)),
+      fixed: false,
+    });
+  }
+  return bodies;
+}
+
+function stepNBodies(bodies, opt, w, h) {
+  const next = bodies.map((b) => ({ ...b }));
+  for (let i = 0; i < bodies.length; i++) {
+    const me = bodies[i];
+    if (me.fixed) continue;
+    let ax = 0;
+    let ay = 0;
+    for (let j = 0; j < bodies.length; j++) {
+      if (i === j) continue;
+      const other = bodies[j];
+      const dx = other.x - me.x;
+      const dy = other.y - me.y;
+      const d2 = dx * dx + dy * dy + opt.softening * opt.softening;
+      const invD = 1 / Math.sqrt(d2);
+      const force = opt.gravity * other.mass / d2;
+      ax += dx * invD * force;
+      ay += dy * invD * force;
+    }
+    const b = next[i];
+    b.vx = (b.vx + ax) * opt.damping;
+    b.vy = (b.vy + ay) * opt.damping;
+    const speed = Math.hypot(b.vx, b.vy);
+    if (speed > opt.maxSpeed) {
+      b.vx = (b.vx / speed) * opt.maxSpeed;
+      b.vy = (b.vy / speed) * opt.maxSpeed;
+    }
+    b.x += b.vx;
+    b.y += b.vy;
+
+    const pad = 8;
+    if (b.x < pad || b.x > w - pad) {
+      b.vx *= -1;
+      b.x = Math.max(pad, Math.min(w - pad, b.x));
+    }
+    if (b.y < pad || b.y > h - pad) {
+      b.vy *= -1;
+      b.y = Math.max(pad, Math.min(h - pad, b.y));
+    }
+  }
+  return next;
 }
 
 function stepBoids(boids, opt, w, h, mouse, explosion, shark) {
@@ -474,6 +572,39 @@ function walkableAt(mask, w, h, x, y) {
   return mask[iy * w + ix] === 1;
 }
 
+function advanceSlimeAgentInMaze(ag, speed, turn, mask, w, h) {
+  const subSteps = Math.max(1, Math.ceil(speed / 0.6));
+  const stepSize = speed / subSteps;
+  for (let step = 0; step < subSteps; step++) {
+    const forwardX = ag.x + Math.cos(ag.a) * stepSize;
+    const forwardY = ag.y + Math.sin(ag.a) * stepSize;
+    if (walkableAt(mask, w, h, forwardX, forwardY)) {
+      ag.x = forwardX;
+      ag.y = forwardY;
+      continue;
+    }
+
+    let moved = false;
+    const probes = [0.45, -0.45, 0.9, -0.9, 1.35, -1.35];
+    for (const mul of probes) {
+      const nextA = ag.a + turn * mul;
+      const nx = ag.x + Math.cos(nextA) * stepSize;
+      const ny = ag.y + Math.sin(nextA) * stepSize;
+      if (!walkableAt(mask, w, h, nx, ny)) continue;
+      ag.a = nextA;
+      ag.x = nx;
+      ag.y = ny;
+      moved = true;
+      break;
+    }
+
+    if (!moved) {
+      ag.a += (Math.random() < 0.5 ? -1 : 1) * turn * 1.8;
+      return;
+    }
+  }
+}
+
 function erodeWalkable(mask, w, h, radius) {
   if (radius <= 0) return mask;
   const out = new Uint8Array(mask.length);
@@ -561,13 +692,20 @@ function generateMazeWorld(w, h, cellSize = 7, wallThickness = 1) {
       }
     }
   }
-  const mask = erodeWalkable(rawMask, w, h, wallThickness);
+  const maxThickness = Math.max(0, Math.floor((cellSize - 1) / 2));
+  const effectiveWallThickness = Math.min(wallThickness, maxThickness);
+  let mask = erodeWalkable(rawMask, w, h, effectiveWallThickness);
+  let walkableCount = 0;
+  for (let i = 0; i < mask.length; i++) walkableCount += mask[i];
+  if (walkableCount === 0) {
+    mask = erodeWalkable(rawMask, w, h, Math.max(0, effectiveWallThickness - 1));
+  }
 
   const ex = Math.floor(ox + (entry.x + 0.5) * cellSize);
   const ey = Math.floor(oy + (entry.y + 0.5) * cellSize);
   const tx = Math.floor(ox + (exit.x + 0.5) * cellSize);
   const ty = Math.floor(oy + (exit.y + 0.5) * cellSize);
-  const carveR = Math.max(2, wallThickness + 1);
+  const carveR = Math.max(2, effectiveWallThickness + 1);
   for (let y = -carveR; y <= carveR; y++) {
     for (let x = -carveR; x <= carveR; x++) {
       if (x * x + y * y > carveR * carveR) continue;
@@ -628,6 +766,38 @@ function findProbeCellNearExit(mask, w, h, exitPx) {
         if (mask[idx] === 1 && mask[up] === 1) return { x, y };
       }
     }
+  }
+  return null;
+}
+
+function findNearestWalkablePoint(mask, w, h, x, y, maxRadius = 18) {
+  if (!mask) return null;
+  const cx = Math.max(0, Math.min(w - 1, Math.floor(x)));
+  const cy = Math.max(0, Math.min(h - 1, Math.floor(y)));
+  const centerIdx = cy * w + cx;
+  if (mask[centerIdx] === 1) return { x: cx, y: cy };
+
+  let best = null;
+  let bestDist2 = Infinity;
+  const rMax = Math.max(1, Math.floor(maxRadius));
+  for (let r = 1; r <= rMax; r++) {
+    for (let py = cy - r; py <= cy + r; py++) {
+      if (py < 0 || py >= h) continue;
+      for (let px = cx - r; px <= cx + r; px++) {
+        if (px < 0 || px >= w) continue;
+        if (Math.abs(px - cx) !== r && Math.abs(py - cy) !== r) continue;
+        const idx = py * w + px;
+        if (mask[idx] !== 1) continue;
+        const dx = px - cx;
+        const dy = py - cy;
+        const dist2 = dx * dx + dy * dy;
+        if (dist2 < bestDist2) {
+          bestDist2 = dist2;
+          best = { x: px, y: py };
+        }
+      }
+    }
+    if (best) return best;
   }
   return null;
 }
@@ -779,6 +949,7 @@ function buildMazeFloodMeta(mask, w, h, entryPx, exitPx = null) {
 
   const pathMask = new Uint8Array(total);
   const pathFillMask = new Uint8Array(total);
+  const pathOrder = [];
   const exitDist = new Int32Array(total);
   exitDist.fill(-1);
   let maxExitDist = 0;
@@ -815,6 +986,7 @@ function buildMazeFloodMeta(mask, w, h, entryPx, exitPx = null) {
 
       let idx = exitIdx;
       pathMask[idx] = 1;
+      pathOrder.push(idx);
       while (idx !== startIdx) {
         const x = idx % w;
         const y = Math.floor(idx / w);
@@ -842,6 +1014,7 @@ function buildMazeFloodMeta(mask, w, h, entryPx, exitPx = null) {
         if (bestIdx === -1 || bestIdx === idx) break;
         idx = bestIdx;
         pathMask[idx] = 1;
+        pathOrder.push(idx);
       }
     }
   }
@@ -875,6 +1048,7 @@ function buildMazeFloodMeta(mask, w, h, entryPx, exitPx = null) {
     maxExitDist,
     pathMask,
     pathFillMask,
+    pathOrder: pathOrder.reverse(),
   };
 }
 
@@ -1100,7 +1274,7 @@ function stepSlime(agents, field, w, h, opt, scratchA, scratchB) {
   const deposited = scratchA;
   deposited.set(field);
   const sa = opt.sensorAngle;
-  const sd = opt.sensorDist;
+  const sd = opt.mazeMask ? Math.min(opt.sensorDist, 8) : opt.sensorDist;
   const turn = opt.turnSpeed;
 
   for (let i = 0; i < agents.length; i++) {
@@ -1116,15 +1290,11 @@ function stepSlime(agents, field, w, h, opt, scratchA, scratchB) {
     else if (r > l) ag.a += turn;
     ag.a += rand(-1, 1) * opt.wiggle;
 
-    const nx = ag.x + Math.cos(ag.a) * opt.speed;
-    const ny = ag.y + Math.sin(ag.a) * opt.speed;
     if (opt.mazeMask) {
-      if (walkableAt(opt.mazeMask, w, h, nx, ny)) {
-        ag.x = nx; ag.y = ny;
-      } else {
-        ag.a += (Math.random() < 0.5 ? -1 : 1) * turn * 1.8;
-      }
+      advanceSlimeAgentInMaze(ag, opt.speed, turn, opt.mazeMask, w, h);
     } else {
+      const nx = ag.x + Math.cos(ag.a) * opt.speed;
+      const ny = ag.y + Math.sin(ag.a) * opt.speed;
       ag.x = nx;
       ag.y = ny;
       if (ag.x < 0) ag.x += w;
@@ -1233,7 +1403,7 @@ export default function CellularAutomataDemo() {
   const [sheet, setSheet] = useState(null); // "brush" | "patterns" | "rules" | "color" | null
   const [speedIdx, setSpeedIdx] = useState(2);
 
-  const [colorPaletteId, setColorPaletteId] = useState(null);
+  const [colorPaletteId, setColorPaletteId] = useState("heat");
   const [zoom, setZoom] = useState(1);
   const [speedCollapsed, setSpeedCollapsed] = useState(true);
   const [zoomCollapsed, setZoomCollapsed] = useState(true);
@@ -1249,8 +1419,16 @@ export default function CellularAutomataDemo() {
   const [boidDrag, setBoidDrag] = useState(BOID_DEFAULTS.drag);
   const [boidRandomness, setBoidRandomness] = useState(BOID_DEFAULTS.randomness);
   const [boidBounce, setBoidBounce] = useState(BOID_DEFAULTS.bounce);
-  const [boidColorMode, setBoidColorMode] = useState("classic");
+  const [boidColorMode, setBoidColorMode] = useState("speed");
   const [boidShape, setBoidShape] = useState("dart");
+  const [boidSpawnMode, setBoidSpawnMode] = useState(false);
+  const [boidSpawnPopupOpen, setBoidSpawnPopupOpen] = useState(false);
+  const [nbodyPreset, setNbodyPreset] = useState("solar");
+  const [nbodyCount, setNbodyCount] = useState(NBODY_DEFAULTS.count);
+  const [nbodyGravity, setNbodyGravity] = useState(NBODY_DEFAULTS.gravity);
+  const [nbodyDamping, setNbodyDamping] = useState(NBODY_DEFAULTS.damping);
+  const [nbodySoftening, setNbodySoftening] = useState(NBODY_DEFAULTS.softening);
+  const [nbodyMaxSpeed, setNbodyMaxSpeed] = useState(NBODY_DEFAULTS.maxSpeed);
   const [sharkEnabled, setSharkEnabled] = useState(true);
   const [slimeCount, setSlimeCount] = useState(9000);
   const [slimeSensorAngle, setSlimeSensorAngle] = useState(0.52);
@@ -1272,11 +1450,14 @@ export default function CellularAutomataDemo() {
   const [slimeCheckpointReady, setSlimeCheckpointReady] = useState(false);
   const [slimeDebugFlow, setSlimeDebugFlow] = useState(false);
   const [slimeDebugStats, setSlimeDebugStats] = useState({ pressure: 0, moveUp: 0, below: 0, above: 0, space: 0, nonZero: 0, peak: 0, maxMoveUp: 0, upTransfers: 0, upVolume: 0 });
+  const [slimeAwaitingStart, setSlimeAwaitingStart] = useState(false);
   const [pathAlgo, setPathAlgo] = useState("astar");
   const [pathMazeLevel, setPathMazeLevel] = useState("medium");
   const [pathSolved, setPathSolved] = useState(false);
   const [pathCompareMode, setPathCompareMode] = useState(false);
   const [pathHistory, setPathHistory] = useState([]);
+  const [pathStatsOpen, setPathStatsOpen] = useState(false);
+  const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
 
   const SPEED_LABELS = ["⅓×", "1×", "2×", "4×"];
   const ZOOM_OPTIONS = [
@@ -1291,6 +1472,7 @@ export default function CellularAutomataDemo() {
   const canvasRef = useRef(null);
   const gridRef = useRef(makeRandomGrid("brian"));
   const boidsRef = useRef(makeBoids(boidCount, GRID_COLS * CELL, GRID_ROWS * CELL, boidShape));
+  const nbodyRef = useRef(makeNBodySystem(NBODY_DEFAULTS.count, GRID_COLS * CELL, GRID_ROWS * CELL));
   const slimeAgentsRef = useRef([]);
   const slimeFieldRef = useRef(new Float32Array(0));
   const slimeSizeRef = useRef({ w: 0, h: 0 });
@@ -1299,6 +1481,9 @@ export default function CellularAutomataDemo() {
   const slimeMazeRef = useRef({ mask: null, entryPx: null, exitPx: null });
   const slimeFlowMetaRef = useRef(null);
   const slimeFlowProgressRef = useRef(0);
+  const slimeFlowPhaseRef = useRef("flood");
+  const slimeFlowReplayIndexRef = useRef(0);
+  const nbodyTrailsRef = useRef([]);
   const pathMazeRef = useRef({ mask: null, entryPx: null, exitPx: null });
   const pathStateRef = useRef(null);
   const pathStatesRef = useRef([]);
@@ -1313,6 +1498,8 @@ export default function CellularAutomataDemo() {
   const zoomRef = useRef(1);    // mirror of zoom state for use inside closures
   const speedPressRef = useRef(null);
   const zoomPressRef = useRef(null);
+  const boidSpawnTraceRef = useRef({ x: null, y: null });
+  const boidSpawnHoldRef = useRef({ timer: null, x: 0, y: 0 });
   const mouseRef = useRef({ active: false, x: 0, y: 0, strength: 0, radius: 120 });
   const explosionRef = useRef({ active: false, x: 0, y: 0, radius: 0, power: 0, ttl: 0 });
   const sharkRef = useRef({ active: true, x: 180, y: 180, vx: 1.9, vy: 0.4, fearRadius: 150, fearStrength: 1.2 });
@@ -1321,12 +1508,15 @@ export default function CellularAutomataDemo() {
   const BOID_SPEEDS = [60, 24, 12, 6];
   const FLOW_SPEEDS = [24, 12, 8, 5];
   const PATH_SPEEDS = [24, 12, 8, 5];
+  const NBODY_SPEEDS = [60, 24, 12, 6];
   const tickMs = mode === "boids"
     ? BOID_SPEEDS[speedIdx]
     : (mode === "slime" && slimeSolverType === "flow")
       ? FLOW_SPEEDS[speedIdx]
       : mode === "pathfinding"
         ? PATH_SPEEDS[speedIdx]
+        : mode === "nbody"
+          ? NBODY_SPEEDS[speedIdx]
         : LIFE_SPEEDS[speedIdx];
 
   function resetSlimeWorld(randomMaze = slimeMazeMode) {
@@ -1343,12 +1533,19 @@ export default function CellularAutomataDemo() {
       slimeMazeRef.current = maze;
       slimeFlowMetaRef.current = buildMazeFloodMeta(maze.mask, w, h, maze.entryPx, maze.exitPx);
       slimeFlowProgressRef.current = 0;
+      slimeFlowPhaseRef.current = "flood";
+      slimeFlowReplayIndexRef.current = 0;
       slimeAgentsRef.current = makeSlimeAgentsAt(slimeCount, maze.entryPx.x, maze.entryPx.y, 10, w, h);
+      setSlimeAwaitingStart(true);
+      setRunning(false);
     } else {
       slimeMazeRef.current = { mask: null, entryPx: null, exitPx: null };
       slimeFlowMetaRef.current = null;
       slimeFlowProgressRef.current = 0;
+      slimeFlowPhaseRef.current = "flood";
+      slimeFlowReplayIndexRef.current = 0;
       slimeAgentsRef.current = makeSlimeAgents(slimeCount, w, h);
+      setSlimeAwaitingStart(false);
     }
     setSlimeEscaped(false);
     setSlimeFillPct(0);
@@ -1368,9 +1565,13 @@ export default function CellularAutomataDemo() {
     slimeMazeRef.current = maze;
     slimeFlowMetaRef.current = buildMazeFloodMeta(maze.mask, w, h, maze.entryPx, maze.exitPx);
     slimeFlowProgressRef.current = 0;
+    slimeFlowPhaseRef.current = "flood";
+    slimeFlowReplayIndexRef.current = 0;
     slimeAgentsRef.current = makeSlimeAgentsAt(slimeCount, maze.entryPx.x, maze.entryPx.y, 8, w, h);
     setSlimeMazeMode(true);
     setSlimeSolverType("flow");
+    setSlimeAwaitingStart(true);
+    setRunning(false);
     setSlimeEscaped(false);
     setSlimeFillPct(0);
     slimeFillRef.current = 0;
@@ -1378,6 +1579,32 @@ export default function CellularAutomataDemo() {
     setSlimeCheckpointReady(false);
     slimeLoopCooldownRef.current = 0;
     draw(gridRef.current);
+  }
+
+  function placeSlimeStart(x, y) {
+    const cv = canvasRef.current;
+    const w = cv?.width || GRID_COLS * CELL;
+    const h = cv?.height || GRID_ROWS * CELL;
+    const maze = slimeMazeRef.current;
+    const mask = maze?.mask;
+    if (!maze || !mask) return false;
+    const snapped = findNearestWalkablePoint(mask, w, h, x, y, 18);
+    if (!snapped) return false;
+    const entryPx = { x: snapped.x, y: snapped.y };
+    slimeMazeRef.current = { ...maze, entryPx };
+    slimeFlowMetaRef.current = buildMazeFloodMeta(mask, w, h, entryPx, maze.exitPx);
+    slimeFlowProgressRef.current = 0;
+    slimeFlowPhaseRef.current = "flood";
+    slimeFlowReplayIndexRef.current = 0;
+    slimeFieldRef.current = makeTrailField(w, h);
+    slimeScratchRef.current = { a: new Float32Array(w * h), b: new Float32Array(w * h) };
+    slimeImageRef.current = { w: 0, h: 0, image: null };
+    slimeAgentsRef.current = makeSlimeAgentsAt(slimeCount, entryPx.x, entryPx.y, 8, w, h);
+    setSlimeEscaped(false);
+    setSlimeFillPct(0);
+    slimeFillRef.current = 0;
+    setSlimeAwaitingStart(true);
+    return true;
   }
 
   function resetPathfindingWorld(useUTest = false) {
@@ -1413,6 +1640,28 @@ export default function CellularAutomataDemo() {
     setPathSolved(false);
     setGeneration(0);
     setRunning(true);
+  }
+
+  function clearSlimeCurrentMazePaths() {
+    const cv = canvasRef.current;
+    const w = cv?.width || GRID_COLS * CELL;
+    const h = cv?.height || GRID_ROWS * CELL;
+    slimeSizeRef.current = { w, h };
+    slimeFieldRef.current = makeTrailField(w, h);
+    slimeScratchRef.current = { a: new Float32Array(w * h), b: new Float32Array(w * h) };
+    slimeImageRef.current = { w: 0, h: 0, image: null };
+    slimeFlowProgressRef.current = 0;
+    slimeFlowPhaseRef.current = "flood";
+    slimeFlowReplayIndexRef.current = 0;
+    const maze = slimeMazeRef.current;
+    if (slimeMazeMode && maze?.entryPx) {
+      slimeAgentsRef.current = makeSlimeAgentsAt(slimeCount, maze.entryPx.x, maze.entryPx.y, 8, w, h);
+    } else {
+      slimeAgentsRef.current = makeSlimeAgents(slimeCount, w, h);
+    }
+    setSlimeEscaped(false);
+    setSlimeFillPct(0);
+    slimeFillRef.current = 0;
   }
 
   function recordPathMetric(state) {
@@ -1494,6 +1743,37 @@ export default function CellularAutomataDemo() {
       }
       return;
     }
+    if (mode === "nbody") {
+      ctx.fillStyle = "#040816";
+      ctx.fillRect(0, 0, cv.width, cv.height);
+      const trails = nbodyTrailsRef.current;
+      for (let i = 0; i < trails.length; i++) {
+        const points = trails[i];
+        if (!points || points.length < 2) continue;
+        for (let j = 1; j < points.length; j++) {
+          const prev = points[j - 1];
+          const curr = points[j];
+          const fade = j / points.length;
+          ctx.beginPath();
+          ctx.strokeStyle = curr.color.replace("__ALPHA__", `${(fade * 0.45).toFixed(3)}`);
+          ctx.lineWidth = 1.5;
+          ctx.moveTo(prev.x, prev.y);
+          ctx.lineTo(curr.x, curr.y);
+          ctx.stroke();
+        }
+      }
+      for (let i = 0; i < nbodyRef.current.length; i++) {
+        const body = nbodyRef.current[i];
+        const speed = Math.hypot(body.vx, body.vy);
+        const t = Math.min(1, speed / Math.max(0.001, nbodyMaxSpeed));
+        const fill = samplePalette(colorRef.current, t) || `hsl(${210 - t * 200} 90% ${68 - t * 20}%)`;
+        ctx.beginPath();
+        ctx.fillStyle = body.fixed ? "#f8fafc" : fill;
+        ctx.arc(body.x, body.y, body.radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      return;
+    }
     if (mode === "slime") {
       const w = cv.width;
       const h = cv.height;
@@ -1549,6 +1829,17 @@ export default function CellularAutomataDemo() {
         img.data[p + 3] = Math.min(255, Math.floor(30 + t * 225));
       }
       ctx.putImageData(img, 0, 0);
+      if (slimeMazeMode && slimeMazeRef.current.entryPx) {
+        const sx = slimeMazeRef.current.entryPx.x;
+        const sy = slimeMazeRef.current.entryPx.y;
+        ctx.fillStyle = slimeAwaitingStart ? "#34d399" : "#86efac";
+        ctx.beginPath();
+        ctx.arc(sx, sy, slimeAwaitingStart ? 6 : 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = slimeAwaitingStart ? "rgba(16,185,129,0.85)" : "rgba(134,239,172,0.8)";
+        ctx.stroke();
+      }
       if (slimeMazeMode && slimeMazeRef.current.exitPx) {
         const ex = slimeMazeRef.current.exitPx.x;
         const ey = slimeMazeRef.current.exitPx.y;
@@ -1701,6 +1992,27 @@ export default function CellularAutomataDemo() {
             explosionRef.current,
             sharkRef.current
           );
+        } else if (mode === "nbody") {
+          const cv = canvasRef.current;
+          if (!cv) return;
+          nbodyRef.current = stepNBodies(nbodyRef.current, {
+            gravity: nbodyGravity,
+            damping: nbodyDamping,
+            softening: nbodySoftening,
+            maxSpeed: nbodyMaxSpeed,
+          }, cv.width, cv.height);
+          const palette = colorRef.current;
+          nbodyTrailsRef.current = nbodyRef.current.map((body, i) => {
+            const prev = nbodyTrailsRef.current[i] || [];
+            const speed = Math.hypot(body.vx, body.vy);
+            const t = Math.min(1, speed / Math.max(0.001, nbodyMaxSpeed));
+            const swatch = samplePalette(palette, t);
+            const rgb = hexToRgb(swatch || "#38bdf8");
+            const color = body.fixed
+              ? "rgba(248,250,252,__ALPHA__)"
+              : `rgba(${rgb?.r ?? 56},${rgb?.g ?? 189},${rgb?.b ?? 248},__ALPHA__)`;
+            return [...prev.slice(-22), { x: body.x, y: body.y, color }];
+          });
         } else if (mode === "slime") {
           const cv = canvasRef.current;
           if (!cv) return;
@@ -1711,7 +2023,7 @@ export default function CellularAutomataDemo() {
           }
           const mazeMask = slimeMazeMode ? slimeMazeRef.current.mask : null;
           if (slimeMazeMode && slimeSolverType === "flow") {
-            if (!slimeEscaped) {
+            if (slimeFlowPhaseRef.current === "flood") {
               const flowMeta = slimeFlowMetaRef.current;
               const flowIters = 2;
               const progressStep = 2.2;
@@ -1758,6 +2070,33 @@ export default function CellularAutomataDemo() {
                   upVolume: flowProbeRef.current.upVolume || 0,
                 });
               }
+            } else if (slimeFlowPhaseRef.current === "replay") {
+              const meta = slimeFlowMetaRef.current;
+              const field = slimeFieldRef.current;
+              const replayTicks = Math.max(1, Math.round(PATH_REPLAY_DURATION_MS / Math.max(1, tickMs)));
+              const replayBatch = Math.max(1, Math.ceil((meta?.pathOrder?.length || 1) / replayTicks));
+              for (let k = 0; k < replayBatch; k++) {
+                const pi = slimeFlowReplayIndexRef.current++;
+                if (!meta?.pathOrder || pi >= meta.pathOrder.length) break;
+                const idx = meta.pathOrder[pi];
+                const cx = idx % w;
+                const cy = Math.floor(idx / w);
+                const radius = Math.max(1, (meta.wallDist?.[idx] || 1) - 1);
+                for (let dy = -radius; dy <= radius; dy++) {
+                  for (let dx = -radius; dx <= radius; dx++) {
+                    if (dx * dx + dy * dy > radius * radius) continue;
+                    const nx = cx + dx;
+                    const ny = cy + dy;
+                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                    const ni = ny * w + nx;
+                    if (mazeMask && mazeMask[ni] === 1) field[ni] = 1.2;
+                  }
+                }
+              }
+              if (!meta?.pathOrder || slimeFlowReplayIndexRef.current >= meta.pathOrder.length) {
+                slimeFlowPhaseRef.current = "done";
+                setSlimeEscaped(true);
+              }
             }
           } else {
             const stepped = stepSlime(slimeAgentsRef.current, slimeFieldRef.current, w, h, {
@@ -1792,6 +2131,12 @@ export default function CellularAutomataDemo() {
               const fill = total > 0 ? (covered / total) * 100 : 0;
               slimeFillRef.current = fill;
               setSlimeFillPct(fill);
+              if (slimeSolverType === "flow" && slimeFlowPhaseRef.current === "flood" && fill >= 99.5) {
+                slimeFlowPhaseRef.current = "replay";
+                slimeFlowReplayIndexRef.current = 0;
+                slimeFieldRef.current.fill(0);
+                setSlimeEscaped(false);
+              }
             }
             const fillForLogic = slimeFillRef.current;
             if (!slimeCheckpointRef.current && fillForLogic >= slimeCheckpointPct) {
@@ -1806,10 +2151,7 @@ export default function CellularAutomataDemo() {
             const ey = slimeMazeRef.current.exitPx.y;
             let hit = false;
             if (slimeSolverType === "flow") {
-              const ix = Math.floor(ex);
-              const iy = Math.floor(ey);
-              const idx = iy * w + ix;
-              hit = (slimeFieldRef.current[idx] || 0) > 0.08;
+              hit = false;
             } else {
               hit = slimeAgentsRef.current.some((ag) => {
                 const dx = ag.x - ex;
@@ -1875,7 +2217,7 @@ export default function CellularAutomataDemo() {
       if (mode !== "pathfinding") setGeneration((g) => g + subSteps);
     }, tickMs);
     return () => clearInterval(t);
-  }, [running, mode, birth, survive, tickMs, boidSeparation, boidAlignment, boidCohesion, boidSteer, boidVision, boidMinSpeed, boidMaxSpeed, boidDrag, boidRandomness, boidBounce, boidColorMode, sharkEnabled, slimeCount, slimeSensorAngle, slimeSensorDist, slimeTurnSpeed, slimeSpeed, slimeDeposit, slimeDecay, slimeDiffuse, slimeWiggle, slimeMazeMode, slimeSolverType, slimeEscaped, pathSolved, pathCompareMode]);
+  }, [running, mode, birth, survive, tickMs, boidSeparation, boidAlignment, boidCohesion, boidSteer, boidVision, boidMinSpeed, boidMaxSpeed, boidDrag, boidRandomness, boidBounce, boidColorMode, sharkEnabled, nbodyGravity, nbodyDamping, nbodySoftening, nbodyMaxSpeed, slimeCount, slimeSensorAngle, slimeSensorDist, slimeTurnSpeed, slimeSpeed, slimeDeposit, slimeDecay, slimeDiffuse, slimeWiggle, slimeMazeMode, slimeSolverType, slimeEscaped, pathSolved, pathCompareMode]);
 
   // Redraw immediately when zoom changes (canvas dims reset, need sync redraw)
   useLayoutEffect(() => {
@@ -1906,8 +2248,19 @@ export default function CellularAutomataDemo() {
 
   function randomize() {
     if (mode === "boids") {
+      stopBoidSpawnHold();
       const cv = canvasRef.current;
       boidsRef.current = makeBoids(boidCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, boidShape);
+      setBoidSpawnMode(false);
+      setBoidSpawnPopupOpen(false);
+    } else if (mode === "nbody") {
+      const cv = canvasRef.current;
+      const preset = NBODY_PRESETS.find((p) => p.id === nbodyPreset) || null;
+      nbodyRef.current = makeNBodySystem(nbodyCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, {
+        gravity: nbodyGravity,
+        ...(preset || {}),
+      });
+      nbodyTrailsRef.current = [];
     } else if (mode === "slime") {
       resetSlimeWorld(slimeMazeMode);
     } else if (mode === "pathfinding") {
@@ -1915,24 +2268,21 @@ export default function CellularAutomataDemo() {
     } else {
       gridRef.current = makeRandomGrid(mode);
     }
-    setRunning(true);
+    if (mode !== "slime") setRunning(true);
     draw(gridRef.current);
     setGeneration(0);
   }
   function clearGrid() {
     if (mode === "boids") {
+      stopBoidSpawnHold();
       boidsRef.current = [];
+      setBoidSpawnMode(false);
+      setBoidSpawnPopupOpen(false);
+    } else if (mode === "nbody") {
+      nbodyRef.current = [];
+      nbodyTrailsRef.current = [];
     } else if (mode === "slime") {
-      const cv = canvasRef.current;
-      const w = cv?.width || GRID_COLS * CELL;
-      const h = cv?.height || GRID_ROWS * CELL;
-      slimeSizeRef.current = { w, h };
-      slimeFieldRef.current = makeTrailField(w, h);
-      slimeAgentsRef.current = [];
-      slimeMazeRef.current = { mask: null, entryPx: null, exitPx: null };
-      slimeFlowMetaRef.current = null;
-      slimeFlowProgressRef.current = 0;
-      setSlimeEscaped(false);
+      clearSlimeCurrentMazePaths();
     } else if (mode === "pathfinding") {
       const cv = canvasRef.current;
       const w = cv?.width || GRID_COLS * CELL;
@@ -1947,9 +2297,18 @@ export default function CellularAutomataDemo() {
     } else {
       gridRef.current = Array.from({ length: GRID_ROWS }, () => Array(GRID_COLS).fill(OFF));
     }
-    setRunning(true);
+    setRunning(false);
     draw(gridRef.current);
     setGeneration(0);
+  }
+
+  function toggleBoidSpawnMode() {
+    stopBoidSpawnHold();
+    setBoidSpawnMode((prev) => {
+      const next = !prev;
+      setBoidSpawnPopupOpen(next);
+      return next;
+    });
   }
 
   // sr, sc are viewport-relative coordinates
@@ -1996,6 +2355,40 @@ export default function CellularAutomataDemo() {
     draw(gridRef.current);
   }
 
+  function spawnBoidAtPoint(x, y, force = false) {
+    if (!force) {
+      const last = boidSpawnTraceRef.current;
+      if (last.x != null && last.y != null) {
+        const dx = x - last.x;
+        const dy = y - last.y;
+        if (dx * dx + dy * dy < 64) return false;
+      }
+    }
+    boidsRef.current = [...boidsRef.current, makeBoidAt(x, y, boidShape)];
+    boidSpawnTraceRef.current = { x, y };
+    return true;
+  }
+
+  function stopBoidSpawnHold() {
+    if (boidSpawnHoldRef.current.timer) {
+      clearInterval(boidSpawnHoldRef.current.timer);
+      boidSpawnHoldRef.current.timer = null;
+    }
+    boidSpawnTraceRef.current = { x: null, y: null };
+  }
+
+  function startBoidSpawnHold(x, y) {
+    boidSpawnHoldRef.current.x = x;
+    boidSpawnHoldRef.current.y = y;
+    stopBoidSpawnHold();
+    boidSpawnHoldRef.current.x = x;
+    boidSpawnHoldRef.current.y = y;
+    boidSpawnHoldRef.current.timer = setInterval(() => {
+      const { x: px, y: py } = boidSpawnHoldRef.current;
+      if (spawnBoidAtPoint(px, py, true)) draw(gridRef.current);
+    }, 70);
+  }
+
   function onSpeedDown() {
     speedPressRef.current = setTimeout(() => { speedPressRef.current = "fired"; setSpeedCollapsed(false); }, 400);
   }
@@ -2030,18 +2423,33 @@ export default function CellularAutomataDemo() {
     setZoom(v);
   }
 
-  function toggleMode() {
-    const nm = MODE_ORDER[(MODE_ORDER.indexOf(mode) + 1) % MODE_ORDER.length];
-    setMode(nm);
-    if (nm === "boids") {
+  function selectMode(nextMode) {
+    setModeDropdownOpen(false);
+    setMode(nextMode);
+    if (nextMode === "boids") {
       const cv = canvasRef.current;
+      const heatPalette = PALETTES.find((p) => p.id === "heat") || null;
+      colorRef.current = heatPalette ? heatPalette.colors : null;
+      setColorPaletteId(heatPalette?.id ?? null);
+      setBoidColorMode("speed");
       boidsRef.current = makeBoids(boidCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, boidShape);
-    } else if (nm === "slime") {
+    } else if (nextMode === "nbody") {
+      const cv = canvasRef.current;
+      const heatPalette = PALETTES.find((p) => p.id === "heat") || null;
+      colorRef.current = heatPalette ? heatPalette.colors : null;
+      setColorPaletteId(heatPalette?.id ?? null);
+      const preset = NBODY_PRESETS.find((p) => p.id === nbodyPreset) || null;
+      nbodyRef.current = makeNBodySystem(nbodyCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, {
+        gravity: nbodyGravity,
+        ...(preset || {}),
+      });
+      nbodyTrailsRef.current = [];
+    } else if (nextMode === "slime") {
       resetSlimeWorld(slimeMazeMode);
-    } else if (nm === "pathfinding") {
+    } else if (nextMode === "pathfinding") {
       resetPathfindingWorld(false);
     } else {
-      gridRef.current = makeRandomGrid(nm);
+      gridRef.current = makeRandomGrid(nextMode);
     }
     draw(gridRef.current);
     setGeneration(0);
@@ -2072,10 +2480,36 @@ export default function CellularAutomataDemo() {
     setGeneration(0);
   }
 
+  function resetNBodyDefaults() {
+    applyNBodyPreset("solar");
+    setGeneration(0);
+  }
+
+  function applyNBodyPreset(presetId) {
+    const preset = NBODY_PRESETS.find((p) => p.id === presetId) || NBODY_PRESETS[0];
+    setNbodyPreset(preset.id);
+    setNbodyCount(preset.count);
+    setNbodyGravity(preset.gravity);
+    setNbodyDamping(preset.damping);
+    setNbodySoftening(preset.softening);
+    setNbodyMaxSpeed(preset.maxSpeed);
+    const cv = canvasRef.current;
+    nbodyRef.current = makeNBodySystem(
+      preset.count,
+      cv?.width || GRID_COLS * CELL,
+      cv?.height || GRID_ROWS * CELL,
+      preset
+    );
+    nbodyTrailsRef.current = [];
+    draw(gridRef.current);
+  }
+
   const ruleString = mode === "brian"
     ? "Brian's Brain"
     : mode === "boids"
       ? "Separation · Alignment · Cohesion"
+      : mode === "nbody"
+        ? "Gravity · Orbit"
       : mode === "slime"
         ? "Physarum Agents"
         : mode === "pathfinding"
@@ -2108,10 +2542,17 @@ export default function CellularAutomataDemo() {
             const rect = e.currentTarget.getBoundingClientRect();
             const sx = e.currentTarget.width / rect.width;
             const sy = e.currentTarget.height / rect.height;
+            const x = (e.clientX - rect.left) * sx;
+            const y = (e.clientY - rect.top) * sy;
+            if (boidSpawnMode) {
+              if (spawnBoidAtPoint(x, y)) draw(gridRef.current);
+              startBoidSpawnHold(x, y);
+              return;
+            }
             mouseRef.current = {
               active: true,
-              x: (e.clientX - rect.left) * sx,
-              y: (e.clientY - rect.top) * sy,
+              x,
+              y,
               strength: e.button === 2 ? -0.12 : 0.12,
               radius: 120,
             };
@@ -2123,6 +2564,12 @@ export default function CellularAutomataDemo() {
               const sy = e.currentTarget.height / rect.height;
               const x = Math.floor((e.clientX - rect.left) * sx);
               const y = Math.floor((e.clientY - rect.top) * sy);
+              if (slimeMazeMode && slimeAwaitingStart) {
+                const placed = placeSlimeStart(x, y);
+                drawingRef.current = false;
+                if (placed) draw(gridRef.current);
+                return;
+              }
               if (x >= 0 && y >= 0 && x < cv.width && y < cv.height) {
                 const idx = y * cv.width + x;
                 const mask = slimeMazeRef.current.mask;
@@ -2141,8 +2588,16 @@ export default function CellularAutomataDemo() {
             const rect = e.currentTarget.getBoundingClientRect();
             const sx = e.currentTarget.width / rect.width;
             const sy = e.currentTarget.height / rect.height;
-            mouseRef.current.x = (e.clientX - rect.left) * sx;
-            mouseRef.current.y = (e.clientY - rect.top) * sy;
+            const x = (e.clientX - rect.left) * sx;
+            const y = (e.clientY - rect.top) * sy;
+            if (boidSpawnMode) {
+              boidSpawnHoldRef.current.x = x;
+              boidSpawnHoldRef.current.y = y;
+              if (spawnBoidAtPoint(x, y)) draw(gridRef.current);
+              return;
+            }
+            mouseRef.current.x = x;
+            mouseRef.current.y = y;
           } else if (mode !== "slime" && mode !== "pathfinding" && !patternBrush) {
             paintAt(e.clientX, e.clientY);
           }
@@ -2161,33 +2616,55 @@ export default function CellularAutomataDemo() {
             ttl: 26,
           };
         }}
-        onPointerUp={() => { drawingRef.current = false; mouseRef.current.active = false; }}
-        onPointerCancel={() => { drawingRef.current = false; mouseRef.current.active = false; }}
+        onPointerUp={() => { drawingRef.current = false; mouseRef.current.active = false; stopBoidSpawnHold(); }}
+        onPointerCancel={() => { drawingRef.current = false; mouseRef.current.active = false; stopBoidSpawnHold(); }}
         className="absolute inset-0 w-full h-full touch-none"
-        style={{ cursor: mode === "boids" ? "grab" : mode === "slime" ? "cell" : mode === "pathfinding" ? "default" : (patternBrush ? "copy" : "crosshair"), imageRendering: "pixelated" }}
+        style={{ cursor: mode === "boids" ? "grab" : mode === "slime" ? "cell" : mode === "pathfinding" || mode === "nbody" ? "default" : (patternBrush ? "copy" : "crosshair"), imageRendering: "pixelated" }}
       />
 
       {/* ─── Protection gradients ─── */}
       <div className="pointer-events-none absolute top-0 left-0 right-0 h-40 bg-gradient-to-b from-slate-950/80 to-transparent" />
       <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-72 bg-gradient-to-t from-slate-950/90 to-transparent" />
 
-      {/* ─── Top-left: mode chip ─── */}
-      <button
-        onClick={toggleMode}
-        className="absolute top-[max(env(safe-area-inset-top),16px)] left-4 z-20 flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10 active:scale-95 transition"
-      >
-        <span
-          className="w-1.5 h-1.5 rounded-full"
-          style={{
-            background: mode === "brian" ? "#7c3aed" : "#38bdf8",
-            boxShadow: `0 0 8px ${mode === "brian" ? "#7c3aed" : "#38bdf8"}`,
-          }}
-        />
-        <span className="text-xs font-bold tracking-wider">{mode === "brian" ? "BRAIN" : mode === "conway" ? "LIFE" : mode === "boids" ? "BOIDS" : mode === "slime" ? "SLIME" : "PATH"}</span>
+      {/* ─── Top-left: mode dropdown ─── */}
+      <div className="absolute top-[max(env(safe-area-inset-top),16px)] left-4 z-[70]">
+        <button
+          onClick={() => setModeDropdownOpen((v) => !v)}
+          className="flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10 active:scale-95 transition"
+        >
+          <span
+            className="w-1.5 h-1.5 rounded-full"
+            style={{
+              background: mode === "brian" ? "#7c3aed" : "#38bdf8",
+              boxShadow: `0 0 8px ${mode === "brian" ? "#7c3aed" : "#38bdf8"}`,
+            }}
+          />
+        <span className="text-xs font-bold tracking-wider">{mode === "brian" ? "BRAIN" : mode === "conway" ? "LIFE" : mode === "boids" ? "BOIDS" : mode === "slime" ? "SLIME" : mode === "pathfinding" ? "PATH" : "N-BODY"}</span>
         <span className="text-[11px] text-slate-400 font-mono pl-2 ml-1 border-l border-white/10">
-          {mode === "brian" ? "·" : mode === "boids" ? "SAC" : mode === "slime" ? "PHYS" : mode === "pathfinding" ? pathAlgoLabel : `${birth.join("")||"—"}/${survive.join("")||"—"}`}
+          {mode === "brian" ? "·" : mode === "boids" ? "SAC" : mode === "slime" ? "PHYS" : mode === "pathfinding" ? pathAlgoLabel : mode === "nbody" ? "GRAV" : `${birth.join("")||"—"}/${survive.join("")||"—"}`}
         </span>
-      </button>
+          <span className="text-slate-400 text-[10px]">{modeDropdownOpen ? "▲" : "▼"}</span>
+        </button>
+        {modeDropdownOpen && (
+          <div className="mt-2 min-w-[180px] p-1.5 rounded-2xl bg-slate-900/90 backdrop-blur-2xl border border-white/10 shadow-2xl shadow-black/50">
+            {MODE_ORDER.map((modeId) => {
+              const label = modeId === "brian" ? "BRAIN" : modeId === "conway" ? "LIFE" : modeId === "boids" ? "BOIDS" : modeId === "slime" ? "SLIME" : modeId === "pathfinding" ? "PATH" : "N-BODY";
+              return (
+                <button
+                  key={`mode-option-${modeId}`}
+                  onClick={() => selectMode(modeId)}
+                  className={`w-full flex items-center justify-between gap-3 px-3 py-2 rounded-xl text-left text-[12px] font-semibold active:scale-[0.99] transition ${
+                    mode === modeId ? "bg-sky-500/90 text-slate-950" : "text-slate-200 hover:bg-white/5"
+                  }`}
+                >
+                  <span>{label}</span>
+                  {mode === modeId && <span className="text-[10px]">●</span>}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
       {mode === "pathfinding" && !sheet && (
         <div
@@ -2210,19 +2687,65 @@ export default function CellularAutomataDemo() {
                 pathAlgo === algo.id
                   ? "bg-cyan-500/90 border-cyan-300/40 text-slate-950"
                   : "bg-slate-900/70 border-white/10 text-slate-200"
-              }`}
+                }`}
             >{algo.label}</button>
           ))}
+          <button
+            onClick={() => setPathStatsOpen((v) => !v)}
+            className={`px-3 py-1.5 rounded-full text-[11px] font-semibold backdrop-blur-xl border active:scale-95 transition ${
+              pathStatsOpen
+                ? "bg-amber-500/90 border-amber-200/40 text-slate-950"
+                : "bg-slate-900/70 border-white/10 text-slate-200"
+            }`}
+          >Stats</button>
         </div>
       )}
 
-      {mode === "pathfinding" && !sheet && (
+      {mode === "boids" && !sheet && (
         <div
-          className="absolute right-4 z-20 rounded-2xl bg-slate-900/75 backdrop-blur-xl border border-white/10 px-3 py-2.5 text-[11px] text-slate-200"
-          style={{ top: "calc(max(env(safe-area-inset-top), 16px) + 42px)" }}
+          className="absolute left-4 z-20 flex flex-wrap items-center gap-1.5 max-w-[calc(100vw-32px)]"
+          style={{ top: "calc(max(env(safe-area-inset-top), 16px) + 46px)" }}
+        >
+          <button
+            onClick={toggleBoidSpawnMode}
+            className={`px-3 py-1.5 rounded-full text-[11px] font-semibold backdrop-blur-xl border active:scale-95 transition ${
+              boidSpawnMode
+                ? "bg-cyan-500/90 border-cyan-200/40 text-slate-950"
+                : "bg-slate-900/70 border-white/10 text-slate-200"
+            }`}
+          >Spawn Fish</button>
+        </div>
+      )}
+
+      {mode === "slime" && slimeMazeMode && slimeAwaitingStart && !sheet && (
+        <div
+          className="absolute left-1/2 -translate-x-1/2 z-20 px-4 py-2 rounded-full bg-amber-500/90 text-slate-950 text-[11px] font-semibold backdrop-blur-xl border border-amber-200/40"
+          style={{ top: "calc(max(env(safe-area-inset-top), 16px) + 48px)" }}
+        >
+          Choose a start point in the maze, then press Play
+        </div>
+      )}
+
+      {mode === "boids" && boidSpawnPopupOpen && !sheet && (
+        <div
+          className="absolute left-1/2 -translate-x-1/2 z-20 flex items-center gap-3 px-4 py-2 rounded-full bg-cyan-500/90 text-slate-950 text-[11px] font-semibold backdrop-blur-xl border border-cyan-200/40"
+          style={{ top: "calc(max(env(safe-area-inset-top), 16px) + 48px)" }}
+        >
+          <span>Hold to spawn fish continuously</span>
+          <button
+            onClick={() => { setBoidSpawnPopupOpen(false); setBoidSpawnMode(false); stopBoidSpawnHold(); }}
+            className="w-5 h-5 rounded-full bg-slate-950/15 hover:bg-slate-950/25 flex items-center justify-center text-[11px]"
+          >✕</button>
+        </div>
+      )}
+
+      {mode === "pathfinding" && !sheet && pathStatsOpen && (
+        <div
+          className="absolute right-3 z-20 rounded-2xl bg-slate-900/75 backdrop-blur-xl border border-white/10 px-3 py-2.5 text-[11px] text-slate-200 max-w-[min(280px,calc(100vw-24px))]"
+          style={{ top: "calc(max(env(safe-area-inset-top), 16px) + 88px)" }}
         >
           {pathCompareMode ? (
-            <div className="space-y-1.5 min-w-[220px]">
+            <div className="space-y-1.5 min-w-[200px]">
               {PATHFINDING_ALGOS.map((algo) => {
                 const metrics = comparePathMetrics?.find((s) => s?.algorithm === algo.id) || null;
                 const colors = PATH_ALGO_COLORS[algo.id];
@@ -2253,7 +2776,7 @@ export default function CellularAutomataDemo() {
             </div>
           )}
           {visiblePathHistory.length > 0 && (
-            <div className="mt-2.5 pt-2.5 border-t border-white/10 space-y-1.5 max-h-40 overflow-y-auto">
+            <div className="mt-2.5 pt-2.5 border-t border-white/10 space-y-1.5 max-h-28 overflow-y-auto">
               {visiblePathHistory.map((item, idx) => (
                 <div key={`${item.mazeSession}-${item.algorithm}-${idx}`} className="flex items-center justify-between gap-3">
                   <div className="flex items-center gap-2 min-w-0">
@@ -2279,12 +2802,9 @@ export default function CellularAutomataDemo() {
       {/* ─── Left: speed pill ─── */}
       <div
         className={`absolute left-3 z-30 transition-all duration-300 ${sheet ? "opacity-0 pointer-events-none" : "opacity-100"}`}
-        style={hudCollapsed
-          ? { bottom: "max(env(safe-area-inset-bottom), 24px)" }
-          : { top: "50%", transform: "translateY(-50%)" }}
+        style={{ bottom: "calc(max(env(safe-area-inset-bottom), 24px) + 72px)" }}
       >
         {speedCollapsed ? (
-          /* Collapsed trigger */
           <div className="flex flex-col items-center p-[3px] rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10">
             <button
               onPointerDown={onSpeedDown} onPointerUp={onSpeedUp} onPointerCancel={onSpeedCancel}
@@ -2292,7 +2812,6 @@ export default function CellularAutomataDemo() {
             >{SPEED_LABELS[speedIdx]}</button>
           </div>
         ) : (
-          /* Expanded list + collapse button */
           <div className="flex flex-col items-center p-[3px] rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10">
             {["4×", "2×", "1×", "⅓×"].map((label, i) => {
               const idx = 3 - i;
@@ -2317,12 +2836,9 @@ export default function CellularAutomataDemo() {
       {/* ─── Right: zoom pill ─── */}
       <div
         className={`absolute right-3 z-30 transition-all duration-300 ${sheet ? "opacity-0 pointer-events-none" : "opacity-100"}`}
-        style={hudCollapsed
-          ? { bottom: "max(env(safe-area-inset-bottom), 24px)" }
-          : { top: "50%", transform: "translateY(-50%)" }}
+        style={{ bottom: "calc(max(env(safe-area-inset-bottom), 24px) + 72px)" }}
       >
         {zoomCollapsed ? (
-          /* Collapsed trigger */
           <div className="flex flex-col items-center p-[3px] rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10">
             <button
               onPointerDown={onZoomDown} onPointerUp={onZoomUp} onPointerCancel={onZoomCancel}
@@ -2330,7 +2846,6 @@ export default function CellularAutomataDemo() {
             >{ZOOM_OPTIONS.find(o => o.v === zoom)?.label ?? "1×"}</button>
           </div>
         ) : (
-          /* Expanded list + collapse button */
           <div className="flex flex-col items-center p-[3px] rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10">
             {ZOOM_OPTIONS.map(({ label, v }) => (
               <button
@@ -2362,30 +2877,27 @@ export default function CellularAutomataDemo() {
 
       {/* ─── Bottom floating HUD ─── */}
       <div
-        className={`absolute left-0 right-0 z-30 flex flex-col items-center gap-2.5 transition-opacity duration-200 ${sheet ? "opacity-40 pointer-events-none" : "opacity-100"} ${hudCollapsed ? "pointer-events-none" : ""}`}
+        className={`absolute left-0 right-0 z-30 flex flex-col items-center gap-2.5 transition-opacity duration-200 ${sheet ? "opacity-40 pointer-events-none" : "opacity-100"}`}
         style={{ bottom: "max(env(safe-area-inset-bottom), 24px)" }}
       >
-        {hudCollapsed ? (
-          /* Collapsed: just expand handle */
-          <button
-            onClick={() => { setHudCollapsed(false); }}
-            className="pointer-events-auto px-5 py-1.5 rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10 text-slate-500 hover:text-slate-300 transition text-[11px]"
-          >▲</button>
-        ) : (
-          /* Expanded: full capsule + separate collapse handle */
-          <>
-            <div className="flex items-center gap-1.5 p-2 rounded-[36px] bg-slate-900/80 backdrop-blur-2xl border border-white/10 shadow-2xl shadow-black/50">
+        <div className="flex items-center gap-1.5 p-2 rounded-[36px]">
               <HudIcon onClick={clearGrid} title="Clear"><TrashIcon /></HudIcon>
               <HudIcon onClick={randomize} title="Randomize"><DiceIcon /></HudIcon>
               {mode !== "boids" && mode !== "slime" && mode !== "pathfinding" && <HudIcon onClick={() => setSheet("brush")} title="Brush"
                 active={sheet === "brush"} activeColor={brushColor(brush)}
               ><BrushIcon /></HudIcon>}
               <button
-                onClick={() => setRunning(!running)}
-                className={`w-[54px] h-[54px] rounded-full flex items-center justify-center text-white active:scale-95 transition shadow-lg ${
+                onClick={() => {
+                  const nextRunning = !running;
+                  if (mode === "slime" && slimeMazeMode && nextRunning) {
+                    setSlimeAwaitingStart(false);
+                  }
+                  setRunning(nextRunning);
+                }}
+                className={`w-8 h-8 rounded-full flex items-center justify-center text-white active:scale-95 transition ${
                   running ? "bg-violet-600 shadow-violet-600/50" : "bg-sky-500 shadow-sky-500/50"
                 }`}
-                style={{ boxShadow: `0 6px 20px ${running ? "rgba(124,58,237,0.5)" : "rgba(14,165,233,0.5)"}, inset 0 1px 0 rgba(255,255,255,0.2)` }}
+                style={{ boxShadow: `0 2px 8px ${running ? "rgba(124,58,237,0.22)" : "rgba(14,165,233,0.22)"}, inset 0 1px 0 rgba(255,255,255,0.14)` }}
               >
                 {running ? <PauseIcon /> : <PlayIcon />}
               </button>
@@ -2398,13 +2910,7 @@ export default function CellularAutomataDemo() {
               <HudIcon onClick={() => setSheet("color")} title="Color"
                 active={sheet === "color" || colorPaletteId !== null} activeColor="bg-orange-500"
               ><PaletteIcon /></HudIcon>
-            </div>
-            <button
-              onClick={() => { setHudCollapsed(true); setSpeedCollapsed(true); setZoomCollapsed(true); }}
-              className="px-5 py-1 rounded-full bg-slate-900/60 backdrop-blur-xl border border-white/10 text-slate-600 hover:text-slate-400 transition text-[10px]"
-            >▼</button>
-          </>
-        )}
+        </div>
       </div>
 
       {/* ─── Sheet overlay ─── */}
@@ -2453,6 +2959,13 @@ export default function CellularAutomataDemo() {
                 boidBounce={boidBounce} setBoidBounce={setBoidBounce}
                 boidShape={boidShape} setBoidShape={setBoidShape}
                 sharkEnabled={sharkEnabled} setSharkEnabled={setSharkEnabled}
+                nbodyPreset={nbodyPreset} setNbodyPreset={setNbodyPreset}
+                applyNBodyPreset={applyNBodyPreset}
+                nbodyCount={nbodyCount} setNbodyCount={setNbodyCount}
+                nbodyGravity={nbodyGravity} setNbodyGravity={setNbodyGravity}
+                nbodyDamping={nbodyDamping} setNbodyDamping={setNbodyDamping}
+                nbodySoftening={nbodySoftening} setNbodySoftening={setNbodySoftening}
+                nbodyMaxSpeed={nbodyMaxSpeed} setNbodyMaxSpeed={setNbodyMaxSpeed}
                 slimeCount={slimeCount} setSlimeCount={setSlimeCount}
                 slimeSensorAngle={slimeSensorAngle} setSlimeSensorAngle={setSlimeSensorAngle}
                 slimeSensorDist={slimeSensorDist} setSlimeSensorDist={setSlimeSensorDist}
@@ -2484,9 +2997,19 @@ export default function CellularAutomataDemo() {
                 regeneratePathMaze={() => { resetPathfindingWorld(false); draw(gridRef.current); }}
                 loadPathUTestMaze={() => { resetPathfindingWorld(true); draw(gridRef.current); }}
                 onResetBoids={resetBoidsDefaults}
+                onResetNBody={resetNBodyDefaults}
                 reinitBoids={() => {
                   const cv = canvasRef.current;
                   boidsRef.current = makeBoids(boidCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, boidShape);
+                  draw(gridRef.current);
+                }}
+                reinitNBody={() => {
+                  const cv = canvasRef.current;
+                  const preset = NBODY_PRESETS.find((p) => p.id === nbodyPreset) || null;
+                  nbodyRef.current = makeNBodySystem(nbodyCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, {
+                    gravity: nbodyGravity,
+                    ...(preset || {}),
+                  });
                   draw(gridRef.current);
                 }}
                 onClose={() => setSheet(null)}
@@ -2515,10 +3038,16 @@ function HudIcon({ children, onClick, title, active, activeColor }) {
     <button
       onClick={onClick}
       title={title}
-      className={`w-10 h-10 rounded-full flex items-center justify-center text-white active:scale-95 transition ${
-        active ? activeColor : "bg-transparent"
-      }`}
-    >{children}</button>
+      className="w-10 h-10 rounded-full flex items-center justify-center text-white active:scale-95 transition"
+    >
+      <span
+        className={`w-8 h-8 rounded-full flex items-center justify-center transition ${
+          active ? `${activeColor} ring-1 ring-white/15` : "bg-transparent"
+        }`}
+      >
+        {children}
+      </span>
+    </button>
   );
 }
 
@@ -2659,6 +3188,8 @@ function RulesSheet({
   boidMinSpeed, setBoidMinSpeed, boidMaxSpeed, setBoidMaxSpeed, boidDrag, setBoidDrag,
   boidRandomness, setBoidRandomness, boidBounce, setBoidBounce,
   boidShape, setBoidShape, sharkEnabled, setSharkEnabled,
+  nbodyPreset, setNbodyPreset, applyNBodyPreset,
+  nbodyCount, setNbodyCount, nbodyGravity, setNbodyGravity, nbodyDamping, setNbodyDamping, nbodySoftening, setNbodySoftening, nbodyMaxSpeed, setNbodyMaxSpeed,
   slimeCount, setSlimeCount, slimeSensorAngle, setSlimeSensorAngle, slimeSensorDist, setSlimeSensorDist,
   slimeTurnSpeed, setSlimeTurnSpeed, slimeSpeed, setSlimeSpeed, slimeDeposit, setSlimeDeposit,
   slimeDecay, setSlimeDecay, slimeDiffuse, setSlimeDiffuse, slimeWiggle, setSlimeWiggle,
@@ -2666,7 +3197,7 @@ function RulesSheet({
   slimeCheckpointPct, setSlimeCheckpointPct, slimeRestartPct, setSlimeRestartPct,
   slimeAutoLoop, setSlimeAutoLoop, slimeCheckpointReady, slimeDebugFlow, setSlimeDebugFlow, slimeDebugStats, saveSlimeCheckpointNow, replaySlimeCheckpoint, loadUTestMaze, regenerateSlimeMaze,
   pathAlgo, setPathAlgo, pathCompareMode, setPathCompareMode, pathMazeLevel, setPathMazeLevel, pathSolved, regeneratePathMaze, loadPathUTestMaze,
-  onResetBoids, reinitBoids, onClose,
+  onResetBoids, onResetNBody, reinitBoids, reinitNBody, onClose,
 }) {
   return (
     <div>
@@ -2822,6 +3353,43 @@ function RulesSheet({
             Algorithms: BFS explores evenly, DFS dives deep, Dijkstra guarantees shortest path, A* biases toward the goal.
           </div>
         </div>
+      ) : mode === "nbody" ? (
+        <div className="space-y-3">
+          <div className="grid grid-cols-3 gap-1.5">
+            {NBODY_PRESETS.map((preset) => (
+              <button
+                key={`nbody-preset-${preset.id}`}
+                onClick={() => applyNBodyPreset(preset.id)}
+                className={`py-2 rounded-lg text-[11px] font-semibold transition active:scale-95 ${
+                  nbodyPreset === preset.id ? "bg-cyan-500 text-slate-950" : "bg-slate-800 text-slate-300"
+                }`}
+              >{preset.label}</button>
+            ))}
+          </div>
+          <button
+            onClick={onResetNBody}
+            className="w-full py-2 rounded-xl bg-slate-700 text-xs font-semibold text-white active:scale-95 transition"
+          >Reset N-Body Defaults</button>
+          <div className="grid grid-cols-3 gap-1.5">
+            {NBODY_COUNTS.map((count) => (
+              <button
+                key={`nbody-count-${count}`}
+                onClick={() => setNbodyCount(count)}
+                className={`py-2 rounded-lg text-[11px] font-semibold transition active:scale-95 ${
+                  nbodyCount === count ? "bg-amber-500 text-slate-950" : "bg-slate-800 text-slate-300"
+                }`}
+              >{count}</button>
+            ))}
+          </div>
+          <button
+            onClick={reinitNBody}
+            className="w-full py-2 rounded-xl bg-slate-800 text-xs font-semibold text-slate-200 active:scale-95 transition"
+          >Apply Count</button>
+          <RangeRow label="Gravity" value={nbodyGravity} min={0.05} max={1.2} step={0.01} onChange={setNbodyGravity} />
+          <RangeRow label="Damping" value={nbodyDamping} min={0.96} max={1} step={0.0005} onChange={setNbodyDamping} />
+          <RangeRow label="Softening" value={nbodySoftening} min={4} max={60} step={1} onChange={setNbodySoftening} />
+          <RangeRow label="Max speed" value={nbodyMaxSpeed} min={1} max={8} step={0.1} onChange={setNbodyMaxSpeed} />
+        </div>
       ) : (
         <div className="space-y-3">
           <button
@@ -2954,10 +3522,10 @@ function RangeRow({ label, value, min, max, step, onChange }) {
 
 // ─── Icons ─────────────────────────────────────────────────────
 function PlayIcon() {
-  return <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5v11l10-5.5z"/></svg>;
+  return <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5v11l10-5.5z"/></svg>;
 }
 function PauseIcon() {
-  return <svg width="14" height="16" viewBox="0 0 12 14" fill="currentColor"><rect x="0" y="0" width="4" height="14" rx="1"/><rect x="8" y="0" width="4" height="14" rx="1"/></svg>;
+  return <svg width="11" height="13" viewBox="0 0 12 14" fill="currentColor"><rect x="0" y="0" width="4" height="14" rx="1"/><rect x="8" y="0" width="4" height="14" rx="1"/></svg>;
 }
 function DiceIcon() {
   return (
