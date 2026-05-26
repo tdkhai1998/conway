@@ -23,7 +23,20 @@ const CELL = 5;
 const OFF = 0;
 const ON = 1;
 const DYING = 2;
-const MODE_ORDER = ["brian", "conway", "boids", "slime"];
+const MODE_ORDER = ["brian", "conway", "boids", "slime", "pathfinding"];
+const PATHFINDING_ALGOS = [
+  { id: "bfs", label: "BFS" },
+  { id: "dfs", label: "DFS" },
+  { id: "dijkstra", label: "Dijkstra" },
+  { id: "astar", label: "A*" },
+];
+const PATH_REPLAY_DURATION_MS = 500;
+const PATH_ALGO_COLORS = {
+  bfs: { frontier: "#22d3ee", visited: "#0ea5e9", path: "#67e8f9" },
+  dfs: { frontier: "#c084fc", visited: "#8b5cf6", path: "#e9d5ff" },
+  dijkstra: { frontier: "#34d399", visited: "#10b981", path: "#a7f3d0" },
+  astar: { frontier: "#f59e0b", visited: "#f97316", path: "#fde68a" },
+};
 const BOID_DEFAULTS = {
   count: 180,
   vision: 44,
@@ -403,6 +416,27 @@ function hexToRgb(hex) {
   };
 }
 
+function hslToRgb(h, s, l) {
+  const hue = ((h % 360) + 360) % 360;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
+  const m = l - c / 2;
+  let r1 = 0;
+  let g1 = 0;
+  let b1 = 0;
+  if (hue < 60) [r1, g1, b1] = [c, x, 0];
+  else if (hue < 120) [r1, g1, b1] = [x, c, 0];
+  else if (hue < 180) [r1, g1, b1] = [0, c, x];
+  else if (hue < 240) [r1, g1, b1] = [0, x, c];
+  else if (hue < 300) [r1, g1, b1] = [x, 0, c];
+  else [r1, g1, b1] = [c, 0, x];
+  return {
+    r: Math.round((r1 + m) * 255),
+    g: Math.round((g1 + m) * 255),
+    b: Math.round((b1 + m) * 255),
+  };
+}
+
 function makeSlimeAgents(count, w, h) {
   return Array.from({ length: count }, () => ({
     x: rand(0, w),
@@ -551,6 +585,517 @@ function generateMazeWorld(w, h, cellSize = 7, wallThickness = 1) {
   };
 }
 
+function generateUTestMazeWorld(w, h) {
+  const mask = new Uint8Array(w * h);
+  const setWalk = (x0, y0, x1, y1) => {
+    const ax = Math.max(0, Math.min(w - 1, x0));
+    const ay = Math.max(0, Math.min(h - 1, y0));
+    const bx = Math.max(0, Math.min(w - 1, x1));
+    const by = Math.max(0, Math.min(h - 1, y1));
+    for (let y = ay; y <= by; y++) {
+      for (let x = ax; x <= bx; x++) mask[y * w + x] = 1;
+    }
+  };
+
+  const left = Math.floor(w * 0.18);
+  const right = Math.floor(w * 0.82);
+  const bottom = Math.floor(h * 0.72);
+  const top = Math.floor(h * 0.26);
+  const ch = Math.max(8, Math.floor(Math.min(w, h) * 0.015));
+
+  // Bottom basin + right vertical shaft + top outlet.
+  setWalk(left, bottom - ch, right - ch, bottom + ch);
+  setWalk(right - ch, top, right + ch, bottom + ch);
+  setWalk(right - ch, top - ch, Math.min(w - 1, right + Math.floor(w * 0.12)), top + ch);
+
+  const entryPx = { x: left + ch + 2, y: bottom };
+  const exitPx = { x: Math.min(w - 2, right + Math.floor(w * 0.1)), y: top };
+  return { mask, entryPx, exitPx };
+}
+
+function findProbeCellNearExit(mask, w, h, exitPx) {
+  if (!mask || !exitPx) return null;
+  const cx = Math.max(0, Math.min(w - 1, Math.floor(exitPx.x)));
+  const cy = Math.max(0, Math.min(h - 1, Math.floor(exitPx.y)));
+  const maxR = 28;
+  for (let r = 1; r <= maxR; r++) {
+    for (let y = cy - r; y <= cy + r; y++) {
+      for (let x = cx - r; x <= cx + r; x++) {
+        if (x <= 0 || y <= 0 || x >= w - 1 || y >= h - 1) continue;
+        if (Math.abs(x - cx) !== r && Math.abs(y - cy) !== r) continue;
+        const idx = y * w + x;
+        const up = idx - w;
+        if (mask[idx] === 1 && mask[up] === 1) return { x, y };
+      }
+    }
+  }
+  return null;
+}
+
+function buildMazeFloodMeta(mask, w, h, entryPx, exitPx = null) {
+  if (!mask || !entryPx) return null;
+  const startX = Math.max(0, Math.min(w - 1, Math.floor(entryPx.x)));
+  const startY = Math.max(0, Math.min(h - 1, Math.floor(entryPx.y)));
+  const startIdx = startY * w + startX;
+  if (mask[startIdx] !== 1) return null;
+
+  const total = w * h;
+  const inf = 1e15;
+  const head = new Float32Array(total);
+  const dist = new Float32Array(total);
+  const arrival = new Float32Array(total);
+  head.fill(inf);
+  dist.fill(inf);
+  arrival.fill(inf);
+
+  const big = total + 1;
+  const heap = [];
+  const push = (node) => {
+    heap.push(node);
+    let i = heap.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (heap[p].score <= node.score) break;
+      heap[i] = heap[p];
+      i = p;
+    }
+    heap[i] = node;
+  };
+  const pop = () => {
+    if (!heap.length) return null;
+    const root = heap[0];
+    const last = heap.pop();
+    if (heap.length && last) {
+      let i = 0;
+      while (true) {
+        let l = i * 2 + 1;
+        let r = l + 1;
+        if (l >= heap.length) break;
+        let c = l;
+        if (r < heap.length && heap[r].score < heap[l].score) c = r;
+        if (last.score <= heap[c].score) break;
+        heap[i] = heap[c];
+        i = c;
+      }
+      heap[i] = last;
+    }
+    return root;
+  };
+
+  head[startIdx] = 0;
+  dist[startIdx] = 0;
+  push({ idx: startIdx, head: 0, dist: 0, score: 0 });
+
+  while (heap.length) {
+    const node = pop();
+    if (!node) break;
+    if (node.head !== head[node.idx] || node.dist !== dist[node.idx]) continue;
+
+    const x = node.idx % w;
+    const y = Math.floor(node.idx / w);
+    const neighbors = [
+      [x, y - 1],
+      [x + 1, y],
+      [x, y + 1],
+      [x - 1, y],
+    ];
+
+    for (const [nx, ny] of neighbors) {
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+      const ni = ny * w + nx;
+      if (mask[ni] !== 1) continue;
+      const nextHead = Math.max(node.head, Math.max(0, startY - ny));
+      const nextDist = node.dist + 1;
+      if (nextHead < head[ni] || (nextHead === head[ni] && nextDist < dist[ni])) {
+        head[ni] = nextHead;
+        dist[ni] = nextDist;
+        push({ idx: ni, head: nextHead, dist: nextDist, score: nextHead * big + nextDist });
+      }
+    }
+  }
+
+  const riseWeight = Math.max(6, Math.round(Math.min(w, h) * 0.05));
+  let maxArrival = 0;
+  let reachableCount = 0;
+  for (let i = 0; i < total; i++) {
+    if (mask[i] !== 1 || !Number.isFinite(head[i]) || head[i] >= inf) continue;
+    const cost = head[i] * riseWeight + dist[i];
+    arrival[i] = cost;
+    if (cost > maxArrival) maxArrival = cost;
+    reachableCount += 1;
+  }
+
+  const wallDist = new Int16Array(total);
+  wallDist.fill(-1);
+  const queue = new Int32Array(total);
+  let qh = 0;
+  let qt = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = y * w + x;
+      if (mask[idx] !== 1) continue;
+      const neighbors = [
+        [x, y - 1],
+        [x + 1, y],
+        [x, y + 1],
+        [x - 1, y],
+      ];
+      let nearWall = false;
+      for (const [nx, ny] of neighbors) {
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) {
+          nearWall = true;
+          break;
+        }
+        if (mask[ny * w + nx] !== 1) {
+          nearWall = true;
+          break;
+        }
+      }
+      if (nearWall) {
+        wallDist[idx] = 1;
+        queue[qt++] = idx;
+      }
+    }
+  }
+  while (qh < qt) {
+    const idx = queue[qh++];
+    const x = idx % w;
+    const y = Math.floor(idx / w);
+    const base = wallDist[idx];
+    const neighbors = [
+      [x, y - 1],
+      [x + 1, y],
+      [x, y + 1],
+      [x - 1, y],
+    ];
+    for (const [nx, ny] of neighbors) {
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+      const ni = ny * w + nx;
+      if (mask[ni] !== 1 || wallDist[ni] !== -1) continue;
+      wallDist[ni] = base + 1;
+      queue[qt++] = ni;
+    }
+  }
+
+  const pathMask = new Uint8Array(total);
+  const pathFillMask = new Uint8Array(total);
+  const exitDist = new Int32Array(total);
+  exitDist.fill(-1);
+  let maxExitDist = 0;
+  if (exitPx) {
+    const exitX = Math.max(0, Math.min(w - 1, Math.floor(exitPx.x)));
+    const exitY = Math.max(0, Math.min(h - 1, Math.floor(exitPx.y)));
+    const exitIdx = exitY * w + exitX;
+    if (mask[exitIdx] === 1 && Number.isFinite(arrival[exitIdx]) && arrival[exitIdx] < inf) {
+      qh = 0;
+      qt = 0;
+      exitDist[exitIdx] = 0;
+      queue[qt++] = exitIdx;
+      while (qh < qt) {
+        const idx = queue[qh++];
+        const x = idx % w;
+        const y = Math.floor(idx / w);
+        const base = exitDist[idx];
+        if (base > maxExitDist) maxExitDist = base;
+        const neighbors = [
+          [x, y - 1],
+          [x + 1, y],
+          [x, y + 1],
+          [x - 1, y],
+        ];
+        for (const [nx, ny] of neighbors) {
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const ni = ny * w + nx;
+          if (mask[ni] !== 1 || exitDist[ni] !== -1) continue;
+          if (!Number.isFinite(arrival[ni]) || arrival[ni] >= inf) continue;
+          exitDist[ni] = base + 1;
+          queue[qt++] = ni;
+        }
+      }
+
+      let idx = exitIdx;
+      pathMask[idx] = 1;
+      while (idx !== startIdx) {
+        const x = idx % w;
+        const y = Math.floor(idx / w);
+        const score = arrival[idx];
+        let bestIdx = -1;
+        let bestScore = score;
+        const neighbors = [
+          [x, y - 1],
+          [x + 1, y],
+          [x, y + 1],
+          [x - 1, y],
+        ];
+        for (const [nx, ny] of neighbors) {
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const ni = ny * w + nx;
+          if (mask[ni] !== 1) continue;
+          const ns = arrival[ni];
+          if (!Number.isFinite(ns) || ns >= inf) continue;
+          const betterByDist = bestIdx === -1 || dist[ni] < dist[bestIdx];
+          if (ns < bestScore || (ns === bestScore && betterByDist)) {
+            bestScore = ns;
+            bestIdx = ni;
+          }
+        }
+        if (bestIdx === -1 || bestIdx === idx) break;
+        idx = bestIdx;
+        pathMask[idx] = 1;
+      }
+    }
+  }
+
+  for (let i = 0; i < total; i++) {
+    if (pathMask[i] !== 1) continue;
+    const cx = i % w;
+    const cy = Math.floor(i / w);
+    const radius = Math.max(1, (wallDist[i] || 1) - 1);
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        if (dx * dx + dy * dy > radius * radius) continue;
+        const nx = cx + dx;
+        const ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const ni = ny * w + nx;
+        if (mask[ni] === 1) pathFillMask[ni] = 1;
+      }
+    }
+  }
+
+  return {
+    arrival,
+    head,
+    dist,
+    wallDist,
+    riseWeight,
+    maxArrival,
+    reachableCount,
+    exitDist,
+    maxExitDist,
+    pathMask,
+    pathFillMask,
+  };
+}
+
+function heuristicManhattan(idx, goalIdx, w) {
+  const x = idx % w;
+  const y = Math.floor(idx / w);
+  const gx = goalIdx % w;
+  const gy = Math.floor(goalIdx / w);
+  return Math.abs(x - gx) + Math.abs(y - gy);
+}
+
+function heapPush(heap, node) {
+  heap.push(node);
+  let i = heap.length - 1;
+  while (i > 0) {
+    const p = (i - 1) >> 1;
+    if (heap[p].priority <= node.priority) break;
+    heap[i] = heap[p];
+    i = p;
+  }
+  heap[i] = node;
+}
+
+function heapPop(heap) {
+  if (!heap.length) return null;
+  const root = heap[0];
+  const last = heap.pop();
+  if (heap.length && last) {
+    let i = 0;
+    while (true) {
+      let l = i * 2 + 1;
+      let r = l + 1;
+      if (l >= heap.length) break;
+      let c = l;
+      if (r < heap.length && heap[r].priority < heap[l].priority) c = r;
+      if (last.priority <= heap[c].priority) break;
+      heap[i] = heap[c];
+      i = c;
+    }
+    heap[i] = last;
+  }
+  return root;
+}
+
+function nowMs() {
+  if (typeof performance !== "undefined" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function createPathfindingState(mask, w, h, entryPx, exitPx, algorithm = "bfs") {
+  if (!mask || !entryPx || !exitPx) return null;
+  const startIdx = Math.max(0, Math.min(w * h - 1, Math.floor(entryPx.y) * w + Math.floor(entryPx.x)));
+  const goalIdx = Math.max(0, Math.min(w * h - 1, Math.floor(exitPx.y) * w + Math.floor(exitPx.x)));
+  const total = w * h;
+  const frontierBits = new Uint8Array(total);
+  const visited = new Uint8Array(total);
+  const path = new Uint8Array(total);
+  const parent = new Int32Array(total);
+  const gScore = new Float32Array(total);
+  parent.fill(-1);
+  gScore.fill(Number.POSITIVE_INFINITY);
+  const frontier = [];
+  const state = {
+    algorithm,
+    startIdx,
+    goalIdx,
+    frontier,
+    frontierHead: 0,
+    frontierBits,
+    visited,
+    path,
+    pathOrder: [],
+    replayIndex: 0,
+    parent,
+    gScore,
+    done: false,
+    found: false,
+    expanded: 0,
+    phase: "search",
+    startedAt: nowMs(),
+    foundAt: null,
+    elapsedMs: null,
+    pathCost: null,
+    statsRecorded: false,
+  };
+
+  const push = (idx, cost) => {
+    if (algorithm === "dfs") {
+      frontier.push(idx);
+    } else if (algorithm === "bfs") {
+      frontier.push(idx);
+    } else {
+      const priority = algorithm === "astar" ? cost + heuristicManhattan(idx, goalIdx, w) : cost;
+      heapPush(frontier, { idx, priority });
+    }
+    frontierBits[idx] = 1;
+  };
+
+  gScore[startIdx] = 0;
+  push(startIdx, 0);
+  return state;
+}
+
+function reconstructPath(state) {
+  const reversed = [];
+  let idx = state.goalIdx;
+  while (idx !== -1) {
+    reversed.push(idx);
+    if (idx === state.startIdx) break;
+    idx = state.parent[idx];
+  }
+  state.pathOrder = reversed.reverse();
+  state.pathCost = Math.max(0, state.pathOrder.length - 1);
+}
+
+function startPathReplay(state) {
+  state.frontier.length = 0;
+  state.frontierHead = 0;
+  state.frontierBits.fill(0);
+  state.visited.fill(0);
+  state.path.fill(0);
+  state.replayIndex = 0;
+  state.phase = "replay";
+  state.done = false;
+}
+
+function stepPathReplay(state, batch = 6) {
+  if (!state || state.phase !== "replay") return 0;
+  let written = 0;
+  for (let i = 0; i < batch; i++) {
+    if (state.replayIndex >= state.pathOrder.length) {
+      state.done = true;
+      break;
+    }
+    const idx = state.pathOrder[state.replayIndex++];
+    state.path[idx] = 1;
+    written += 1;
+  }
+  if (state.replayIndex >= state.pathOrder.length) {
+    state.done = true;
+  }
+  return written;
+}
+
+function stepPathfinding(state, mask, w, batch = 1200) {
+  if (!state || state.done || state.phase !== "search") return 0;
+  let processed = 0;
+  for (let n = 0; n < batch; n++) {
+    let idx = -1;
+    if (state.algorithm === "dfs") {
+      while (state.frontier.length) {
+        const cand = state.frontier.pop();
+        if (cand == null) break;
+        if (!state.visited[cand]) { idx = cand; break; }
+      }
+    } else if (state.algorithm === "bfs") {
+      while (state.frontierHead < state.frontier.length) {
+        const cand = state.frontier[state.frontierHead++];
+        if (!state.visited[cand]) { idx = cand; break; }
+      }
+    } else {
+      while (state.frontier.length) {
+        const node = heapPop(state.frontier);
+        if (!node) break;
+        if (!state.visited[node.idx]) { idx = node.idx; break; }
+      }
+    }
+
+    if (idx === -1) {
+      state.done = true;
+      break;
+    }
+
+    state.frontierBits[idx] = 0;
+    state.visited[idx] = 1;
+    processed += 1;
+    state.expanded += 1;
+
+    if (idx === state.goalIdx) {
+      state.found = true;
+      state.foundAt = nowMs();
+      state.elapsedMs = state.foundAt - state.startedAt;
+      reconstructPath(state);
+      startPathReplay(state);
+      break;
+    }
+
+    const x = idx % w;
+    const y = Math.floor(idx / w);
+    const neighbors = [
+      [x, y - 1],
+      [x + 1, y],
+      [x, y + 1],
+      [x - 1, y],
+    ];
+    for (const [nx, ny] of neighbors) {
+      if (nx < 0 || ny < 0 || nx >= w || ny >= mask.length / w) continue;
+      const ni = ny * w + nx;
+      if (mask[ni] !== 1 || state.visited[ni]) continue;
+      const nextCost = state.gScore[idx] + 1;
+      if (state.algorithm === "bfs" || state.algorithm === "dfs") {
+        if (!state.frontierBits[ni] && state.parent[ni] === -1 && ni !== state.startIdx) {
+          state.parent[ni] = idx;
+          state.gScore[ni] = nextCost;
+          state.frontier.push(ni);
+          state.frontierBits[ni] = 1;
+        }
+      } else if (nextCost < state.gScore[ni]) {
+        state.parent[ni] = idx;
+        state.gScore[ni] = nextCost;
+        const priority = state.algorithm === "astar" ? nextCost + heuristicManhattan(ni, state.goalIdx, w) : nextCost;
+        heapPush(state.frontier, { idx: ni, priority });
+        state.frontierBits[ni] = 1;
+      }
+    }
+  }
+  return processed;
+}
+
 function stepSlime(agents, field, w, h, opt, scratchA, scratchB) {
   const deposited = scratchA;
   deposited.set(field);
@@ -622,71 +1167,57 @@ function stepSlime(agents, field, w, h, opt, scratchA, scratchB) {
 }
 
 function stepMazeFlow(field, w, h, opt, scratchA, scratchB) {
-  const a = scratchA;
-  a.set(field);
-  const b = scratchB;
+  const next = scratchA;
+  next.fill(0);
   const mask = opt.mazeMask;
-  const spread = opt.spread;
-  const decay = opt.decay;
-  const source = opt.source;
-  const maxDist = Math.max(1, Math.hypot(w, h) * 0.6);
+  const meta = opt.flowMeta;
+  const cap = opt.maxValue ?? 1.35;
+  const progress = opt.progress ?? 0;
+  const fillSpan = opt.fillSpan ?? 10;
+  const debugProbe = opt.debugProbe || null;
+  const debugOut = opt.debugOut || null;
 
-  if (opt.source) {
-    const sx = Math.floor(opt.source.x);
-    const sy = Math.floor(opt.source.y);
-    const r = opt.sourceRadius || 3;
-    for (let y = -r; y <= r; y++) {
-      for (let x = -r; x <= r; x++) {
-        if (x * x + y * y > r * r) continue;
-        const xx = sx + x, yy = sy + y;
-        if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
-        const idx = yy * w + xx;
-        if (!mask || mask[idx] === 1) a[idx] += opt.inject;
-      }
-    }
-  }
-  if (opt.sink) {
-    const sx = Math.floor(opt.sink.x);
-    const sy = Math.floor(opt.sink.y);
-    const r = opt.sinkRadius || 3;
-    for (let y = -r; y <= r; y++) {
-      for (let x = -r; x <= r; x++) {
-        if (x * x + y * y > r * r) continue;
-        const xx = sx + x, yy = sy + y;
-        if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
-        const idx = yy * w + xx;
-        if (!mask || mask[idx] === 1) {
-          a[idx] = Math.max(0, a[idx] - (opt.drain || 0));
-        }
-      }
-    }
+  if (!mask || !meta) {
+    return next;
   }
 
+  let nonZero = 0;
+  let peak = 0;
+  let unlocked = 0;
+  let filled = 0;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const idx = y * w + x;
-      if (mask && mask[idx] !== 1) {
-        b[idx] = 0;
-        continue;
+      if (mask[idx] !== 1) continue;
+      const arrival = meta.arrival[idx];
+      if (!Number.isFinite(arrival) || arrival > meta.maxArrival + fillSpan) continue;
+      const delta = progress - arrival;
+      if (delta <= 0) continue;
+      unlocked += 1;
+      const value = Math.min(cap, (delta / fillSpan) * cap);
+      next[idx] = value;
+      if (value > 0.0001) nonZero += 1;
+      if (value > 0.05) filled += 1;
+      if (value > peak) peak = value;
+
+      if (debugProbe && debugOut && x === debugProbe.x && y === debugProbe.y) {
+        debugOut.pressure = delta;
+        debugOut.moveUp = value;
+        debugOut.below = meta.head[idx];
+        debugOut.above = arrival;
+        debugOut.space = Math.max(0, fillSpan - delta);
       }
-      const distNorm = source ? Math.min(1, Math.hypot(x - source.x, y - source.y) / maxDist) : 0;
-      const distEase = distNorm * distNorm * (3 - 2 * distNorm);
-      const localSpread = Math.min(
-        opt.maxSpread ?? 0.9,
-        spread + distEase * (opt.spreadBoost || 0)
-      );
-      let s = a[idx];
-      let n = 1;
-      if (x > 0 && (!mask || mask[idx - 1] === 1)) { s += a[idx - 1]; n++; }
-      if (x < w - 1 && (!mask || mask[idx + 1] === 1)) { s += a[idx + 1]; n++; }
-      if (y > 0 && (!mask || mask[idx - w] === 1)) { s += a[idx - w]; n++; }
-      if (y < h - 1 && (!mask || mask[idx + w] === 1)) { s += a[idx + w]; n++; }
-      const avg = s / n;
-      const mixed = a[idx] * (1 - localSpread) + avg * localSpread;
-      b[idx] = Math.max(0, Math.min(opt.maxValue ?? 255, mixed * decay));
     }
   }
-  return b;
+
+  if (debugOut) {
+    debugOut.maxMoveUp = peak;
+    debugOut.upTransfers = unlocked;
+    debugOut.upVolume = filled;
+    debugOut.nonZero = nonZero;
+    debugOut.peak = peak;
+  }
+  return next;
 }
 
 // ─── Main component ────────────────────────────────────────────
@@ -739,6 +1270,13 @@ export default function CellularAutomataDemo() {
   const [slimeRestartPct, setSlimeRestartPct] = useState(96);
   const [slimeAutoLoop, setSlimeAutoLoop] = useState(false);
   const [slimeCheckpointReady, setSlimeCheckpointReady] = useState(false);
+  const [slimeDebugFlow, setSlimeDebugFlow] = useState(false);
+  const [slimeDebugStats, setSlimeDebugStats] = useState({ pressure: 0, moveUp: 0, below: 0, above: 0, space: 0, nonZero: 0, peak: 0, maxMoveUp: 0, upTransfers: 0, upVolume: 0 });
+  const [pathAlgo, setPathAlgo] = useState("astar");
+  const [pathMazeLevel, setPathMazeLevel] = useState("medium");
+  const [pathSolved, setPathSolved] = useState(false);
+  const [pathCompareMode, setPathCompareMode] = useState(false);
+  const [pathHistory, setPathHistory] = useState([]);
 
   const SPEED_LABELS = ["⅓×", "1×", "2×", "4×"];
   const ZOOM_OPTIONS = [
@@ -759,11 +1297,17 @@ export default function CellularAutomataDemo() {
   const slimeScratchRef = useRef({ a: new Float32Array(0), b: new Float32Array(0) });
   const slimeImageRef = useRef({ w: 0, h: 0, image: null });
   const slimeMazeRef = useRef({ mask: null, entryPx: null, exitPx: null });
+  const slimeFlowMetaRef = useRef(null);
+  const slimeFlowProgressRef = useRef(0);
+  const pathMazeRef = useRef({ mask: null, entryPx: null, exitPx: null });
+  const pathStateRef = useRef(null);
+  const pathStatesRef = useRef([]);
+  const pathMazeSessionRef = useRef(0);
   const slimeCheckpointRef = useRef(null);
   const slimeLoopCooldownRef = useRef(0);
   const slimeUiTickRef = useRef(0);
   const slimeFillRef = useRef(0);
-  const flowPhaseRef = useRef(0);
+  const flowProbeRef = useRef({ pressure: 0, space: 0, moveUp: 0, below: 0, above: 0 });
   const drawingRef = useRef(false);
   const colorRef = useRef(null); // null = classic | colors array
   const zoomRef = useRef(1);    // mirror of zoom state for use inside closures
@@ -776,11 +1320,14 @@ export default function CellularAutomataDemo() {
   const LIFE_SPEEDS = [240, 90, 45, 22];
   const BOID_SPEEDS = [60, 24, 12, 6];
   const FLOW_SPEEDS = [24, 12, 8, 5];
+  const PATH_SPEEDS = [24, 12, 8, 5];
   const tickMs = mode === "boids"
     ? BOID_SPEEDS[speedIdx]
     : (mode === "slime" && slimeSolverType === "flow")
       ? FLOW_SPEEDS[speedIdx]
-      : LIFE_SPEEDS[speedIdx];
+      : mode === "pathfinding"
+        ? PATH_SPEEDS[speedIdx]
+        : LIFE_SPEEDS[speedIdx];
 
   function resetSlimeWorld(randomMaze = slimeMazeMode) {
     const cv = canvasRef.current;
@@ -794,9 +1341,13 @@ export default function CellularAutomataDemo() {
       const cfg = SLIME_MAZE_LEVELS[slimeMazeLevel] ?? SLIME_MAZE_LEVELS.medium;
       const maze = generateMazeWorld(w, h, cfg.cellSize, cfg.wallThickness);
       slimeMazeRef.current = maze;
+      slimeFlowMetaRef.current = buildMazeFloodMeta(maze.mask, w, h, maze.entryPx, maze.exitPx);
+      slimeFlowProgressRef.current = 0;
       slimeAgentsRef.current = makeSlimeAgentsAt(slimeCount, maze.entryPx.x, maze.entryPx.y, 10, w, h);
     } else {
       slimeMazeRef.current = { mask: null, entryPx: null, exitPx: null };
+      slimeFlowMetaRef.current = null;
+      slimeFlowProgressRef.current = 0;
       slimeAgentsRef.current = makeSlimeAgents(slimeCount, w, h);
     }
     setSlimeEscaped(false);
@@ -806,11 +1357,86 @@ export default function CellularAutomataDemo() {
     slimeLoopCooldownRef.current = 0;
   }
 
+  function loadUTestMaze() {
+    const cv = canvasRef.current;
+    const w = cv?.width || GRID_COLS * CELL;
+    const h = cv?.height || GRID_ROWS * CELL;
+    slimeSizeRef.current = { w, h };
+    slimeFieldRef.current = makeTrailField(w, h);
+    slimeScratchRef.current = { a: new Float32Array(w * h), b: new Float32Array(w * h) };
+    const maze = generateUTestMazeWorld(w, h);
+    slimeMazeRef.current = maze;
+    slimeFlowMetaRef.current = buildMazeFloodMeta(maze.mask, w, h, maze.entryPx, maze.exitPx);
+    slimeFlowProgressRef.current = 0;
+    slimeAgentsRef.current = makeSlimeAgentsAt(slimeCount, maze.entryPx.x, maze.entryPx.y, 8, w, h);
+    setSlimeMazeMode(true);
+    setSlimeSolverType("flow");
+    setSlimeEscaped(false);
+    setSlimeFillPct(0);
+    slimeFillRef.current = 0;
+    slimeCheckpointRef.current = null;
+    setSlimeCheckpointReady(false);
+    slimeLoopCooldownRef.current = 0;
+    draw(gridRef.current);
+  }
+
+  function resetPathfindingWorld(useUTest = false) {
+    const cv = canvasRef.current;
+    const w = cv?.width || GRID_COLS * CELL;
+    const h = cv?.height || GRID_ROWS * CELL;
+    const maze = useUTest
+      ? generateUTestMazeWorld(w, h)
+      : generateMazeWorld(w, h, (SLIME_MAZE_LEVELS[pathMazeLevel] ?? SLIME_MAZE_LEVELS.medium).cellSize, (SLIME_MAZE_LEVELS[pathMazeLevel] ?? SLIME_MAZE_LEVELS.medium).wallThickness);
+    pathMazeSessionRef.current += 1;
+    pathMazeRef.current = maze;
+    pathStateRef.current = createPathfindingState(maze.mask, w, h, maze.entryPx, maze.exitPx, pathAlgo);
+    pathStatesRef.current = pathCompareMode
+      ? PATHFINDING_ALGOS.map((algo) => createPathfindingState(maze.mask, w, h, maze.entryPx, maze.exitPx, algo.id))
+      : [];
+    setPathSolved(false);
+    setPathHistory([]);
+    setGeneration(0);
+  }
+
+  function restartPathfindingCurrentMaze() {
+    const cv = canvasRef.current;
+    const w = cv?.width || GRID_COLS * CELL;
+    const h = cv?.height || GRID_ROWS * CELL;
+    const maze = pathMazeRef.current?.mask
+      ? pathMazeRef.current
+      : generateMazeWorld(w, h, (SLIME_MAZE_LEVELS[pathMazeLevel] ?? SLIME_MAZE_LEVELS.medium).cellSize, (SLIME_MAZE_LEVELS[pathMazeLevel] ?? SLIME_MAZE_LEVELS.medium).wallThickness);
+    pathMazeRef.current = maze;
+    pathStateRef.current = createPathfindingState(maze.mask, w, h, maze.entryPx, maze.exitPx, pathAlgo);
+    pathStatesRef.current = pathCompareMode
+      ? PATHFINDING_ALGOS.map((algo) => createPathfindingState(maze.mask, w, h, maze.entryPx, maze.exitPx, algo.id))
+      : [];
+    setPathSolved(false);
+    setGeneration(0);
+    setRunning(true);
+  }
+
+  function recordPathMetric(state) {
+    if (!state || state.statsRecorded || state.elapsedMs == null || state.pathCost == null) return;
+    state.statsRecorded = true;
+    const algoLabel = PATHFINDING_ALGOS.find((algo) => algo.id === state.algorithm)?.label ?? state.algorithm.toUpperCase();
+    setPathHistory((prev) => [
+      ...prev,
+      {
+        mazeSession: pathMazeSessionRef.current,
+        algorithm: state.algorithm,
+        label: algoLabel,
+        elapsedMs: state.elapsedMs,
+        pathCost: state.pathCost,
+      },
+    ]);
+  }
+
   function saveSlimeCheckpointNow() {
     slimeCheckpointRef.current = {
       field: new Float32Array(slimeFieldRef.current),
       agents: slimeAgentsRef.current.map((a) => ({ ...a })),
       escaped: slimeEscaped,
+      flowProgress: slimeFlowProgressRef.current,
     };
     setSlimeCheckpointReady(true);
   }
@@ -820,6 +1446,7 @@ export default function CellularAutomataDemo() {
     if (!cp) return;
     slimeFieldRef.current = new Float32Array(cp.field);
     slimeAgentsRef.current = cp.agents.map((a) => ({ ...a }));
+    slimeFlowProgressRef.current = cp.flowProgress ?? slimeFlowProgressRef.current;
     setSlimeEscaped(cp.escaped);
     slimeLoopCooldownRef.current = 24;
     draw(gridRef.current);
@@ -879,6 +1506,8 @@ export default function CellularAutomataDemo() {
       const img = slimeImageRef.current.image;
       const src = slimeFieldRef.current;
       const mazeMask = slimeMazeRef.current.mask;
+      const flowMeta = slimeFlowMetaRef.current;
+      const solvedPathMask = slimeEscaped && slimeSolverType === "flow" ? slimeFlowMetaRef.current?.pathFillMask : null;
       const paletteRgb = (colorRef.current || []).map(hexToRgb);
       for (let i = 0; i < src.length; i++) {
         if (mazeMask && mazeMask[i] !== 1) {
@@ -888,19 +1517,34 @@ export default function CellularAutomataDemo() {
           img.data[i * 4 + 3] = 255;
           continue;
         }
-        const tScale = slimeSolverType === "flow" ? 2.2 : 6.5;
+        const tScale = slimeSolverType === "flow" ? 1.2 : 6.5;
         const t = Math.min(1, src[i] / tScale);
-        const pIdx = Math.round(Math.max(0, Math.min(1, t)) * Math.max(0, paletteRgb.length - 1));
-        const c = paletteRgb[pIdx] || null;
         const p = i * 4;
-        if (c) {
-          img.data[p] = c.r;
-          img.data[p + 1] = c.g;
-          img.data[p + 2] = c.b;
+        if (slimeSolverType === "flow" && flowMeta?.exitDist) {
+          const raw = flowMeta.exitDist[i];
+          const goalT = raw >= 0 && flowMeta.maxExitDist > 0
+            ? 1 - Math.min(1, raw / flowMeta.maxExitDist)
+            : 0;
+          const hue = 200 - goalT * 200;
+          const sat = 85 + goalT * 10;
+          let light = 50 + t * 10 + goalT * 2;
+          if (solvedPathMask && solvedPathMask[i] === 1) light += 8;
+          const rgb = hslToRgb(hue, sat / 100, Math.min(0.72, light / 100));
+          img.data[p] = rgb.r;
+          img.data[p + 1] = rgb.g;
+          img.data[p + 2] = rgb.b;
         } else {
-          img.data[p] = 15;
-          img.data[p + 1] = Math.floor(220 * t);
-          img.data[p + 2] = Math.floor(255 * t);
+          const pIdx = Math.round(Math.max(0, Math.min(1, t)) * Math.max(0, paletteRgb.length - 1));
+          const c = paletteRgb[pIdx] || null;
+          if (c) {
+            img.data[p] = c.r;
+            img.data[p + 1] = c.g;
+            img.data[p + 2] = c.b;
+          } else {
+            img.data[p] = 15;
+            img.data[p + 1] = Math.floor(220 * t);
+            img.data[p + 2] = Math.floor(255 * t);
+          }
         }
         img.data[p + 3] = Math.min(255, Math.floor(30 + t * 225));
       }
@@ -912,6 +1556,75 @@ export default function CellularAutomataDemo() {
         ctx.beginPath();
         ctx.arc(ex, ey, 6, 0, Math.PI * 2);
         ctx.fill();
+      }
+      if (slimeDebugFlow && slimeSolverType === "flow" && slimeMazeMode) {
+        const p = flowProbeRef.current;
+        ctx.fillStyle = "rgba(15,23,42,0.75)";
+        ctx.fillRect(10, 10, 270, 64);
+        ctx.fillStyle = "#e2e8f0";
+        ctx.font = "12px ui-monospace, Menlo, monospace";
+        ctx.fillText(`probe pressure: ${p.pressure.toFixed(2)}  moveUp: ${p.moveUp.toFixed(2)}`, 16, 32);
+        ctx.fillText(`below: ${p.below.toFixed(2)}  above: ${p.above.toFixed(2)}  space: ${p.space.toFixed(2)}`, 16, 50);
+      }
+      return;
+    }
+    if (mode === "pathfinding") {
+      const w = cv.width;
+      const h = cv.height;
+      const maze = pathMazeRef.current;
+      const state = pathStateRef.current;
+      const compareStates = pathCompareMode ? pathStatesRef.current : null;
+      const mask = maze?.mask;
+      ctx.fillStyle = "#050816";
+      ctx.fillRect(0, 0, w, h);
+      for (let i = 0; i < w * h; i++) {
+        const x = i % w;
+        const y = Math.floor(i / w);
+        if (!mask || mask[i] !== 1) {
+          ctx.fillStyle = "#222630";
+        } else if (compareStates?.length) {
+          let fill = "#0f172a";
+          for (const algoState of compareStates) {
+            const colors = PATH_ALGO_COLORS[algoState.algorithm];
+            if (algoState.path[i]) fill = colors.path;
+            else if (algoState.frontierBits[i]) fill = colors.frontier;
+            else if (algoState.visited[i]) fill = colors.visited;
+          }
+          ctx.fillStyle = fill;
+        } else if (state?.path[i]) {
+          ctx.fillStyle = "#f59e0b";
+        } else if (state?.visited[i]) {
+          ctx.fillStyle = "#2563eb";
+        } else if (state?.frontierBits[i]) {
+          ctx.fillStyle = "#22d3ee";
+        } else {
+          ctx.fillStyle = "#0f172a";
+        }
+        ctx.fillRect(x, y, 1, 1);
+      }
+      if (maze?.entryPx) {
+        ctx.fillStyle = "#34d399";
+        ctx.beginPath();
+        ctx.arc(maze.entryPx.x, maze.entryPx.y, 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (maze?.exitPx) {
+        ctx.fillStyle = pathSolved ? "#ef4444" : "#f59e0b";
+        ctx.beginPath();
+        ctx.arc(maze.exitPx.x, maze.exitPx.y, 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (compareStates?.length) {
+        let lx = 14;
+        for (const algo of PATHFINDING_ALGOS) {
+          const colors = PATH_ALGO_COLORS[algo.id];
+          ctx.fillStyle = colors.path;
+          ctx.fillRect(lx, 14, 10, 10);
+          ctx.fillStyle = "#e2e8f0";
+          ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
+          ctx.fillText(algo.label, lx + 14, 23);
+          lx += 68;
+        }
       }
       return;
     }
@@ -934,7 +1647,7 @@ export default function CellularAutomataDemo() {
     draw(gridRef.current);
     const t = setInterval(() => {
       if (!running) return;
-      const subSteps = mode === "slime" && slimeSolverType === "flow" ? 1 : 4;
+      const subSteps = 1;
       for (let step = 0; step < subSteps; step++) {
         if (mode === "boids") {
           const cv = canvasRef.current;
@@ -998,28 +1711,53 @@ export default function CellularAutomataDemo() {
           }
           const mazeMask = slimeMazeMode ? slimeMazeRef.current.mask : null;
           if (slimeMazeMode && slimeSolverType === "flow") {
-            const flowIters = 60;
-            flowPhaseRef.current += 0.045;
-            const pulse = 0.62 + 0.38 * (0.5 + 0.5 * Math.sin(flowPhaseRef.current));
-            const flowInject = (1500 * pulse) / flowIters;
-            const flowDrain = 4.2 + 2.4 * (1 - pulse);
-            for (let fi = 0; fi < flowIters; fi++) {
-              slimeFieldRef.current = stepMazeFlow(slimeFieldRef.current, w, h, {
-                mazeMask,
-                source: slimeMazeRef.current.entryPx,
-                sourceRadius: 4,
-                sink: slimeMazeRef.current.exitPx,
-                sinkRadius: 3,
-                drain: flowDrain,
-                inject: flowInject,
-                spread: 0.28,
-                spreadBoost: 0.18,
-                maxSpread: 0.46,
-                decay: 0.9988,
-                maxValue: 900,
-              }, slimeScratchRef.current.a, slimeScratchRef.current.b);
-              const s2 = slimeScratchRef.current;
-              slimeScratchRef.current = { a: s2.b, b: s2.a };
+            if (!slimeEscaped) {
+              const flowMeta = slimeFlowMetaRef.current;
+              const flowIters = 2;
+              const progressStep = 2.2;
+              if (slimeDebugFlow) {
+                flowProbeRef.current.pressure = 0;
+                flowProbeRef.current.moveUp = 0;
+                flowProbeRef.current.below = 0;
+                flowProbeRef.current.above = 0;
+                flowProbeRef.current.space = 0;
+                flowProbeRef.current.maxMoveUp = 0;
+                flowProbeRef.current.upTransfers = 0;
+                flowProbeRef.current.upVolume = 0;
+                flowProbeRef.current.nonZero = 0;
+                flowProbeRef.current.peak = 0;
+              }
+              const probe = findProbeCellNearExit(mazeMask, w, h, slimeMazeRef.current.exitPx);
+              for (let fi = 0; fi < flowIters; fi++) {
+                slimeFlowProgressRef.current += progressStep;
+                if (slimeDebugFlow && fi === 0 && probe) {
+                  flowProbeRef.current.x = probe.x;
+                  flowProbeRef.current.y = probe.y;
+                }
+                slimeFieldRef.current = stepMazeFlow(slimeFieldRef.current, w, h, {
+                  mazeMask,
+                  flowMeta,
+                  progress: slimeFlowProgressRef.current,
+                  maxValue: 1.2,
+                  fillSpan: 12,
+                  debugProbe: slimeDebugFlow ? probe : null,
+                  debugOut: slimeDebugFlow ? flowProbeRef.current : null,
+                }, slimeScratchRef.current.a, slimeScratchRef.current.b);
+              }
+              if (slimeDebugFlow) {
+                setSlimeDebugStats({
+                  pressure: flowProbeRef.current.pressure || slimeFlowProgressRef.current,
+                  moveUp: flowProbeRef.current.moveUp || 0,
+                  below: flowProbeRef.current.below || 0,
+                  above: flowProbeRef.current.above || 0,
+                  space: flowProbeRef.current.space || 0,
+                  nonZero: flowProbeRef.current.nonZero || 0,
+                  peak: flowProbeRef.current.peak || 0,
+                  maxMoveUp: flowProbeRef.current.maxMoveUp || 0,
+                  upTransfers: flowProbeRef.current.upTransfers || 0,
+                  upVolume: flowProbeRef.current.upVolume || 0,
+                });
+              }
             }
           } else {
             const stepped = stepSlime(slimeAgentsRef.current, slimeFieldRef.current, w, h, {
@@ -1048,7 +1786,7 @@ export default function CellularAutomataDemo() {
               for (let i = 0; i < mazeMask.length; i++) {
                 if (mazeMask[i] === 1) {
                   total++;
-                  if (slimeFieldRef.current[i] > 0.85) covered++;
+                  if (slimeFieldRef.current[i] > 0.05) covered++;
                 }
               }
               const fill = total > 0 ? (covered / total) * 100 : 0;
@@ -1071,7 +1809,7 @@ export default function CellularAutomataDemo() {
               const ix = Math.floor(ex);
               const iy = Math.floor(ey);
               const idx = iy * w + ix;
-              hit = (slimeFieldRef.current[idx] || 0) > 1.1;
+              hit = (slimeFieldRef.current[idx] || 0) > 0.08;
             } else {
               hit = slimeAgentsRef.current.some((ag) => {
                 const dx = ag.x - ex;
@@ -1081,6 +1819,52 @@ export default function CellularAutomataDemo() {
             }
             if (hit) setSlimeEscaped(true);
           }
+        } else if (mode === "pathfinding") {
+          const cv = canvasRef.current;
+          if (!cv) return;
+          const w = cv.width;
+          if (!pathMazeRef.current.mask || (!pathCompareMode && !pathStateRef.current) || (pathCompareMode && !pathStatesRef.current.length)) {
+            resetPathfindingWorld(false);
+          }
+          const maze = pathMazeRef.current;
+          let processed = 0;
+          if (pathCompareMode) {
+            let allDone = true;
+            for (const state of pathStatesRef.current) {
+              if (!state) continue;
+              if (!state.done) allDone = false;
+              if (state.phase === "search") {
+                processed += stepPathfinding(state, maze.mask, w, 24);
+                recordPathMetric(state);
+              } else if (state.phase === "replay") {
+                const replayTicks = Math.max(1, Math.round(PATH_REPLAY_DURATION_MS / Math.max(1, tickMs)));
+                const replayBatch = Math.max(1, Math.ceil((state.pathOrder?.length || 1) / replayTicks));
+                processed += stepPathReplay(state, replayBatch);
+              }
+              if (!state.done) allDone = false;
+            }
+            if (allDone && pathStatesRef.current.length) {
+              if (!pathSolved) setPathSolved(true);
+              setRunning(false);
+            }
+          } else {
+            const state = pathStateRef.current;
+            if (state?.phase === "search") {
+              processed = stepPathfinding(state, maze.mask, w, 48);
+              recordPathMetric(state);
+            } else if (state?.phase === "replay") {
+              const replayTicks = Math.max(1, Math.round(PATH_REPLAY_DURATION_MS / Math.max(1, tickMs)));
+              const replayBatch = Math.max(1, Math.ceil((state.pathOrder?.length || 1) / replayTicks));
+              processed = stepPathReplay(state, replayBatch);
+            }
+            if (state?.done && state.phase === "replay") {
+              if (!pathSolved) setPathSolved(true);
+              setRunning(false);
+            }
+          }
+          if (processed > 0) {
+            setGeneration((g) => g + processed);
+          }
         } else {
           gridRef.current = mode === "conway"
             ? stepLife(gridRef.current, birth, survive)
@@ -1088,10 +1872,10 @@ export default function CellularAutomataDemo() {
         }
       }
       draw(gridRef.current);
-      setGeneration((g) => g + subSteps);
+      if (mode !== "pathfinding") setGeneration((g) => g + subSteps);
     }, tickMs);
     return () => clearInterval(t);
-  }, [running, mode, birth, survive, tickMs, boidSeparation, boidAlignment, boidCohesion, boidSteer, boidVision, boidMinSpeed, boidMaxSpeed, boidDrag, boidRandomness, boidBounce, boidColorMode, sharkEnabled, slimeCount, slimeSensorAngle, slimeSensorDist, slimeTurnSpeed, slimeSpeed, slimeDeposit, slimeDecay, slimeDiffuse, slimeWiggle, slimeMazeMode, slimeSolverType, slimeEscaped]);
+  }, [running, mode, birth, survive, tickMs, boidSeparation, boidAlignment, boidCohesion, boidSteer, boidVision, boidMinSpeed, boidMaxSpeed, boidDrag, boidRandomness, boidBounce, boidColorMode, sharkEnabled, slimeCount, slimeSensorAngle, slimeSensorDist, slimeTurnSpeed, slimeSpeed, slimeDeposit, slimeDecay, slimeDiffuse, slimeWiggle, slimeMazeMode, slimeSolverType, slimeEscaped, pathSolved, pathCompareMode]);
 
   // Redraw immediately when zoom changes (canvas dims reset, need sync redraw)
   useLayoutEffect(() => {
@@ -1100,10 +1884,21 @@ export default function CellularAutomataDemo() {
   }, [zoom]);
 
   useEffect(() => {
-    if (mode !== "slime") return;
-    resetSlimeWorld(slimeMazeMode);
+    if (mode === "slime") {
+      resetSlimeWorld(slimeMazeMode);
+      draw(gridRef.current);
+    } else if (mode === "pathfinding") {
+      resetPathfindingWorld(false);
+      draw(gridRef.current);
+    }
+  }, [mode, slimeMazeMode, slimeMazeLevel, slimeSolverType, pathMazeLevel]);
+
+  useEffect(() => {
+    if (mode !== "pathfinding") return;
+    if (!pathMazeRef.current?.mask) return;
+    restartPathfindingCurrentMaze();
     draw(gridRef.current);
-  }, [mode, slimeMazeMode, slimeMazeLevel, slimeSolverType]);
+  }, [pathAlgo, pathCompareMode]);
 
   useEffect(() => {
     if (slimeRestartPct < slimeCheckpointPct) setSlimeRestartPct(slimeCheckpointPct);
@@ -1115,9 +1910,12 @@ export default function CellularAutomataDemo() {
       boidsRef.current = makeBoids(boidCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, boidShape);
     } else if (mode === "slime") {
       resetSlimeWorld(slimeMazeMode);
+    } else if (mode === "pathfinding") {
+      resetPathfindingWorld(false);
     } else {
       gridRef.current = makeRandomGrid(mode);
     }
+    setRunning(true);
     draw(gridRef.current);
     setGeneration(0);
   }
@@ -1132,10 +1930,24 @@ export default function CellularAutomataDemo() {
       slimeFieldRef.current = makeTrailField(w, h);
       slimeAgentsRef.current = [];
       slimeMazeRef.current = { mask: null, entryPx: null, exitPx: null };
+      slimeFlowMetaRef.current = null;
+      slimeFlowProgressRef.current = 0;
       setSlimeEscaped(false);
+    } else if (mode === "pathfinding") {
+      const cv = canvasRef.current;
+      const w = cv?.width || GRID_COLS * CELL;
+      const h = cv?.height || GRID_ROWS * CELL;
+      const maze = pathMazeRef.current.mask ? pathMazeRef.current : generateMazeWorld(w, h, (SLIME_MAZE_LEVELS[pathMazeLevel] ?? SLIME_MAZE_LEVELS.medium).cellSize, (SLIME_MAZE_LEVELS[pathMazeLevel] ?? SLIME_MAZE_LEVELS.medium).wallThickness);
+      pathMazeRef.current = maze;
+      pathStateRef.current = createPathfindingState(maze.mask, w, h, maze.entryPx, maze.exitPx, pathAlgo);
+      pathStatesRef.current = pathCompareMode
+        ? PATHFINDING_ALGOS.map((algo) => createPathfindingState(maze.mask, w, h, maze.entryPx, maze.exitPx, algo.id))
+        : [];
+      setPathSolved(false);
     } else {
       gridRef.current = Array.from({ length: GRID_ROWS }, () => Array(GRID_COLS).fill(OFF));
     }
+    setRunning(true);
     draw(gridRef.current);
     setGeneration(0);
   }
@@ -1226,6 +2038,8 @@ export default function CellularAutomataDemo() {
       boidsRef.current = makeBoids(boidCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, boidShape);
     } else if (nm === "slime") {
       resetSlimeWorld(slimeMazeMode);
+    } else if (nm === "pathfinding") {
+      resetPathfindingWorld(false);
     } else {
       gridRef.current = makeRandomGrid(nm);
     }
@@ -1264,9 +2078,15 @@ export default function CellularAutomataDemo() {
       ? "Separation · Alignment · Cohesion"
       : mode === "slime"
         ? "Physarum Agents"
+        : mode === "pathfinding"
+          ? pathCompareMode ? "Multi Search" : "Graph Search"
       : `B${birth.join("") || "—"}/S${survive.join("") || "—"}`;
 
   const cat = CATALOG[mode] ?? [];
+  const pathAlgoLabel = pathCompareMode ? "ALL" : (PATHFINDING_ALGOS.find((algo) => algo.id === pathAlgo)?.label ?? "A*");
+  const singlePathMetrics = mode === "pathfinding" ? pathStateRef.current : null;
+  const comparePathMetrics = mode === "pathfinding" && pathCompareMode ? pathStatesRef.current : [];
+  const visiblePathHistory = pathHistory.slice().reverse();
 
   // Canvas dimensions match the visible viewport in pixels
   const { visRows, visCols } = getViewport(zoom);
@@ -1309,6 +2129,8 @@ export default function CellularAutomataDemo() {
                 if ((!mask || mask[idx] === 1) && slimeFieldRef.current[idx] !== undefined) slimeFieldRef.current[idx] += 16;
               }
             }
+          } else if (mode === "pathfinding") {
+            drawingRef.current = false;
           } else {
             paintAt(e.clientX, e.clientY);
           }
@@ -1321,7 +2143,7 @@ export default function CellularAutomataDemo() {
             const sy = e.currentTarget.height / rect.height;
             mouseRef.current.x = (e.clientX - rect.left) * sx;
             mouseRef.current.y = (e.clientY - rect.top) * sy;
-          } else if (mode !== "slime" && !patternBrush) {
+          } else if (mode !== "slime" && mode !== "pathfinding" && !patternBrush) {
             paintAt(e.clientX, e.clientY);
           }
         }}
@@ -1342,7 +2164,7 @@ export default function CellularAutomataDemo() {
         onPointerUp={() => { drawingRef.current = false; mouseRef.current.active = false; }}
         onPointerCancel={() => { drawingRef.current = false; mouseRef.current.active = false; }}
         className="absolute inset-0 w-full h-full touch-none"
-        style={{ cursor: mode === "boids" ? "grab" : mode === "slime" ? "cell" : (patternBrush ? "copy" : "crosshair"), imageRendering: "pixelated" }}
+        style={{ cursor: mode === "boids" ? "grab" : mode === "slime" ? "cell" : mode === "pathfinding" ? "default" : (patternBrush ? "copy" : "crosshair"), imageRendering: "pixelated" }}
       />
 
       {/* ─── Protection gradients ─── */}
@@ -1361,11 +2183,92 @@ export default function CellularAutomataDemo() {
             boxShadow: `0 0 8px ${mode === "brian" ? "#7c3aed" : "#38bdf8"}`,
           }}
         />
-        <span className="text-xs font-bold tracking-wider">{mode === "brian" ? "BRAIN" : mode === "conway" ? "LIFE" : mode === "boids" ? "BOIDS" : "SLIME"}</span>
+        <span className="text-xs font-bold tracking-wider">{mode === "brian" ? "BRAIN" : mode === "conway" ? "LIFE" : mode === "boids" ? "BOIDS" : mode === "slime" ? "SLIME" : "PATH"}</span>
         <span className="text-[11px] text-slate-400 font-mono pl-2 ml-1 border-l border-white/10">
-          {mode === "brian" ? "·" : mode === "boids" ? "SAC" : mode === "slime" ? "PHYS" : `${birth.join("")||"—"}/${survive.join("")||"—"}`}
+          {mode === "brian" ? "·" : mode === "boids" ? "SAC" : mode === "slime" ? "PHYS" : mode === "pathfinding" ? pathAlgoLabel : `${birth.join("")||"—"}/${survive.join("")||"—"}`}
         </span>
       </button>
+
+      {mode === "pathfinding" && !sheet && (
+        <div
+          className="absolute left-4 z-20 flex flex-wrap items-center gap-1.5 max-w-[calc(100vw-32px)]"
+          style={{ top: "calc(max(env(safe-area-inset-top), 16px) + 46px)" }}
+        >
+          <button
+            onClick={() => setPathCompareMode(!pathCompareMode)}
+            className={`px-3 py-1.5 rounded-full text-[11px] font-semibold backdrop-blur-xl border active:scale-95 transition ${
+              pathCompareMode
+                ? "bg-fuchsia-500/90 border-fuchsia-300/40 text-white"
+                : "bg-slate-900/70 border-white/10 text-slate-200"
+            }`}
+          >{pathCompareMode ? "Compare All" : "Single"}</button>
+          {!pathCompareMode && PATHFINDING_ALGOS.map((algo) => (
+            <button
+              key={`path-chip-${algo.id}`}
+              onClick={() => setPathAlgo(algo.id)}
+              className={`px-3 py-1.5 rounded-full text-[11px] font-semibold backdrop-blur-xl border active:scale-95 transition ${
+                pathAlgo === algo.id
+                  ? "bg-cyan-500/90 border-cyan-300/40 text-slate-950"
+                  : "bg-slate-900/70 border-white/10 text-slate-200"
+              }`}
+            >{algo.label}</button>
+          ))}
+        </div>
+      )}
+
+      {mode === "pathfinding" && !sheet && (
+        <div
+          className="absolute right-4 z-20 rounded-2xl bg-slate-900/75 backdrop-blur-xl border border-white/10 px-3 py-2.5 text-[11px] text-slate-200"
+          style={{ top: "calc(max(env(safe-area-inset-top), 16px) + 42px)" }}
+        >
+          {pathCompareMode ? (
+            <div className="space-y-1.5 min-w-[220px]">
+              {PATHFINDING_ALGOS.map((algo) => {
+                const metrics = comparePathMetrics?.find((s) => s?.algorithm === algo.id) || null;
+                const colors = PATH_ALGO_COLORS[algo.id];
+                return (
+                  <div key={`metric-${algo.id}`} className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: colors.path }} />
+                      <span className="font-semibold">{algo.label}</span>
+                    </div>
+                    <div className="font-mono text-slate-300">
+                      {metrics?.elapsedMs != null ? `${metrics.elapsedMs.toFixed(0)}ms` : "…"} · {metrics?.pathCost != null ? metrics.pathCost : "—"}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="space-y-1 min-w-[160px]">
+              <div className="font-semibold text-white">{pathAlgoLabel}</div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-400">Time</span>
+                <span className="font-mono">{singlePathMetrics?.elapsedMs != null ? `${singlePathMetrics.elapsedMs.toFixed(0)}ms` : "…"}</span>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-400">Cost</span>
+                <span className="font-mono">{singlePathMetrics?.pathCost != null ? singlePathMetrics.pathCost : "—"}</span>
+              </div>
+            </div>
+          )}
+          {visiblePathHistory.length > 0 && (
+            <div className="mt-2.5 pt-2.5 border-t border-white/10 space-y-1.5 max-h-40 overflow-y-auto">
+              {visiblePathHistory.map((item, idx) => (
+                <div key={`${item.mazeSession}-${item.algorithm}-${idx}`} className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: PATH_ALGO_COLORS[item.algorithm]?.path || "#e2e8f0" }} />
+                    <span className="font-semibold">{item.label}</span>
+                  </div>
+                  <div className="font-mono text-slate-300">
+                    {item.elapsedMs.toFixed(0)}ms · {item.pathCost}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ─── Top-right: generation counter ─── */}
       <div className="absolute top-[max(env(safe-area-inset-top),16px)] right-4 z-20 px-3 py-1.5 rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10 font-mono text-[11px] tracking-wider">
@@ -1447,7 +2350,7 @@ export default function CellularAutomataDemo() {
       </div>
 
       {/* ─── Pattern brush badge ─── */}
-      {patternBrush && mode !== "boids" && mode !== "slime" && !sheet && (
+      {patternBrush && mode !== "boids" && mode !== "slime" && mode !== "pathfinding" && !sheet && (
         <div className="absolute left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-violet-600/85 backdrop-blur-xl border border-white/15 shadow-lg shadow-violet-600/40" style={{ top: "max(env(safe-area-inset-top), 12px)" }}>
           <span className="text-xs font-bold">● Tap to place {patternBrush}</span>
           <button
@@ -1474,7 +2377,7 @@ export default function CellularAutomataDemo() {
             <div className="flex items-center gap-1.5 p-2 rounded-[36px] bg-slate-900/80 backdrop-blur-2xl border border-white/10 shadow-2xl shadow-black/50">
               <HudIcon onClick={clearGrid} title="Clear"><TrashIcon /></HudIcon>
               <HudIcon onClick={randomize} title="Randomize"><DiceIcon /></HudIcon>
-              {mode !== "boids" && mode !== "slime" && <HudIcon onClick={() => setSheet("brush")} title="Brush"
+              {mode !== "boids" && mode !== "slime" && mode !== "pathfinding" && <HudIcon onClick={() => setSheet("brush")} title="Brush"
                 active={sheet === "brush"} activeColor={brushColor(brush)}
               ><BrushIcon /></HudIcon>}
               <button
@@ -1486,7 +2389,7 @@ export default function CellularAutomataDemo() {
               >
                 {running ? <PauseIcon /> : <PlayIcon />}
               </button>
-              {mode !== "boids" && mode !== "slime" && <HudIcon onClick={() => setSheet("patterns")} title="Patterns"
+              {mode !== "boids" && mode !== "slime" && mode !== "pathfinding" && <HudIcon onClick={() => setSheet("patterns")} title="Patterns"
                 active={sheet === "patterns"} activeColor="bg-violet-600"
               ><PatternsIcon /></HudIcon>}
               <HudIcon onClick={() => setSheet("rules")} title="Rules"
@@ -1568,9 +2471,18 @@ export default function CellularAutomataDemo() {
                 slimeRestartPct={slimeRestartPct} setSlimeRestartPct={setSlimeRestartPct}
                 slimeAutoLoop={slimeAutoLoop} setSlimeAutoLoop={setSlimeAutoLoop}
                 slimeCheckpointReady={slimeCheckpointReady}
+                slimeDebugFlow={slimeDebugFlow} setSlimeDebugFlow={setSlimeDebugFlow}
+                slimeDebugStats={slimeDebugStats}
                 saveSlimeCheckpointNow={saveSlimeCheckpointNow}
                 replaySlimeCheckpoint={replaySlimeCheckpoint}
+                loadUTestMaze={loadUTestMaze}
                 regenerateSlimeMaze={() => { resetSlimeWorld(true); draw(gridRef.current); }}
+                pathAlgo={pathAlgo} setPathAlgo={setPathAlgo}
+                pathCompareMode={pathCompareMode} setPathCompareMode={setPathCompareMode}
+                pathMazeLevel={pathMazeLevel} setPathMazeLevel={setPathMazeLevel}
+                pathSolved={pathSolved}
+                regeneratePathMaze={() => { resetPathfindingWorld(false); draw(gridRef.current); }}
+                loadPathUTestMaze={() => { resetPathfindingWorld(true); draw(gridRef.current); }}
                 onResetBoids={resetBoidsDefaults}
                 reinitBoids={() => {
                   const cv = canvasRef.current;
@@ -1752,7 +2664,8 @@ function RulesSheet({
   slimeDecay, setSlimeDecay, slimeDiffuse, setSlimeDiffuse, slimeWiggle, setSlimeWiggle,
   slimeMazeMode, setSlimeMazeMode, slimeMazeLevel, setSlimeMazeLevel, slimeSolverType, setSlimeSolverType, slimeEscaped, slimeFillPct,
   slimeCheckpointPct, setSlimeCheckpointPct, slimeRestartPct, setSlimeRestartPct,
-  slimeAutoLoop, setSlimeAutoLoop, slimeCheckpointReady, saveSlimeCheckpointNow, replaySlimeCheckpoint, regenerateSlimeMaze,
+  slimeAutoLoop, setSlimeAutoLoop, slimeCheckpointReady, slimeDebugFlow, setSlimeDebugFlow, slimeDebugStats, saveSlimeCheckpointNow, replaySlimeCheckpoint, loadUTestMaze, regenerateSlimeMaze,
+  pathAlgo, setPathAlgo, pathCompareMode, setPathCompareMode, pathMazeLevel, setPathMazeLevel, pathSolved, regeneratePathMaze, loadPathUTestMaze,
   onResetBoids, reinitBoids, onClose,
 }) {
   return (
@@ -1852,6 +2765,63 @@ function RulesSheet({
             }`}
           >{boidBounce ? "Bounce Edges: On" : "Bounce Edges: Off (Wrap)"}</button>
         </div>
+      ) : mode === "pathfinding" ? (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              onClick={() => setPathCompareMode(false)}
+              className={`py-2 rounded-lg text-[11px] font-semibold transition active:scale-95 ${
+                !pathCompareMode ? "bg-cyan-500 text-slate-950" : "bg-slate-800 text-slate-300"
+              }`}
+            >Single</button>
+            <button
+              onClick={() => setPathCompareMode(true)}
+              className={`py-2 rounded-lg text-[11px] font-semibold transition active:scale-95 ${
+                pathCompareMode ? "bg-fuchsia-500 text-white" : "bg-slate-800 text-slate-300"
+              }`}
+            >Compare All</button>
+          </div>
+          {!pathCompareMode && (
+          <div className="grid grid-cols-2 gap-1.5">
+            {PATHFINDING_ALGOS.map((algo) => (
+              <button
+                key={algo.id}
+                onClick={() => setPathAlgo(algo.id)}
+                className={`py-2 rounded-lg text-[11px] font-semibold transition active:scale-95 ${
+                  pathAlgo === algo.id ? "bg-cyan-500 text-slate-950" : "bg-slate-800 text-slate-300"
+                }`}
+              >{algo.label}</button>
+            ))}
+          </div>
+          )}
+          <div className="grid grid-cols-3 gap-1.5">
+            {Object.entries(SLIME_MAZE_LEVELS).map(([id, cfg]) => (
+              <button
+                key={`path-${id}`}
+                onClick={() => setPathMazeLevel(id)}
+                className={`py-2 rounded-lg text-[11px] font-semibold transition active:scale-95 ${
+                  pathMazeLevel === id ? "bg-sky-600 text-white" : "bg-slate-800 text-slate-300"
+                }`}
+              >{cfg.label}</button>
+            ))}
+          </div>
+          <button
+            onClick={regeneratePathMaze}
+            className="w-full py-2 rounded-xl bg-slate-700 text-xs font-semibold text-white active:scale-95 transition"
+          >Generate Maze</button>
+          <button
+            onClick={loadPathUTestMaze}
+            className="w-full py-2 rounded-xl bg-slate-800 text-xs font-semibold text-slate-200 active:scale-95 transition"
+          >Load U-Test Maze</button>
+          <div className={`text-[11px] rounded-lg px-2.5 py-2 ${pathSolved ? "bg-emerald-500/20 text-emerald-300" : "bg-cyan-500/20 text-cyan-300"}`}>
+            {pathSolved
+              ? (pathCompareMode ? "Solved: all algorithms finished and replayed their paths." : "Solved: final path locked on screen.")
+              : (pathCompareMode ? "Comparing: all algorithms search the same maze with different colors." : "Searching: frontier, visited set, and route are animated.")}
+          </div>
+          <div className="text-[11px] rounded-lg px-2.5 py-2 bg-slate-800 text-slate-300">
+            Algorithms: BFS explores evenly, DFS dives deep, Dijkstra guarantees shortest path, A* biases toward the goal.
+          </div>
+        </div>
       ) : (
         <div className="space-y-3">
           <button
@@ -1891,9 +2861,29 @@ function RulesSheet({
                 onClick={regenerateSlimeMaze}
                 className="w-full py-2 rounded-xl bg-slate-700 text-xs font-semibold text-white active:scale-95 transition"
               >Generate Maze</button>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  onClick={loadUTestMaze}
+                  className="py-2 rounded-lg text-[11px] font-semibold bg-slate-700 text-white active:scale-95 transition"
+                >Load U-Test Maze</button>
+                <button
+                  onClick={() => setSlimeDebugFlow(!slimeDebugFlow)}
+                  className={`py-2 rounded-lg text-[11px] font-semibold active:scale-95 transition ${
+                    slimeDebugFlow ? "bg-emerald-500 text-slate-900" : "bg-slate-800 text-slate-300"
+                  }`}
+                >{slimeDebugFlow ? "Debug Flow: On" : "Debug Flow: Off"}</button>
+              </div>
               <div className={`text-[11px] rounded-lg px-2.5 py-2 ${slimeEscaped ? "bg-emerald-500/20 text-emerald-300" : "bg-amber-500/20 text-amber-300"}`}>
                 {slimeEscaped ? "Escaped: reached the exit." : "Goal: reach the amber exit dot."}
               </div>
+              {slimeDebugFlow && (
+                <div className="text-[11px] rounded-lg px-2.5 py-2 bg-slate-800 text-slate-200 font-mono">
+                  <div>pressure: {slimeDebugStats.pressure.toFixed(2)} · moveUp: {slimeDebugStats.moveUp.toFixed(2)}</div>
+                  <div>below: {slimeDebugStats.below.toFixed(2)} · above: {slimeDebugStats.above.toFixed(2)} · space: {slimeDebugStats.space.toFixed(2)}</div>
+                  <div>nonZero: {slimeDebugStats.nonZero} · peak: {slimeDebugStats.peak.toFixed(2)}</div>
+                  <div>maxMoveUp: {slimeDebugStats.maxMoveUp.toFixed(2)} · upTransfers: {slimeDebugStats.upTransfers} · upVolume: {slimeDebugStats.upVolume.toFixed(2)}</div>
+                </div>
+              )}
               <div className="text-[11px] rounded-lg px-2.5 py-2 bg-sky-500/20 text-sky-300">
                 Path filled: {slimeFillPct.toFixed(1)}%
               </div>
