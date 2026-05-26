@@ -266,7 +266,8 @@ function makeNBodySystem(count, w, h, config = {}) {
   const radiusMax = config.radiusMax ?? 0.42;
   const jitter = config.jitter ?? 0.08;
   const centerMass = config.centerMass ?? 240;
-  const bodies = [{
+  const withCentralBody = config.centralBody !== false;
+  const bodies = withCentralBody ? [{
     x: cx,
     y: cy,
     vx: 0,
@@ -274,8 +275,8 @@ function makeNBodySystem(count, w, h, config = {}) {
     mass: centerMass,
     radius: 6,
     fixed: true,
-  }];
-  const orbiters = Math.max(1, count - 1);
+  }] : [];
+  const orbiters = withCentralBody ? Math.max(1, count - 1) : count;
   for (let i = 0; i < orbiters; i++) {
     const angle = rand(0, Math.PI * 2);
     const radius = rand(Math.min(w, h) * radiusMin, Math.min(w, h) * radiusMax);
@@ -290,7 +291,7 @@ function makeNBodySystem(count, w, h, config = {}) {
       vx: Math.cos(tangent) * orbitalSpeed + rand(-jitter, jitter),
       vy: Math.sin(tangent) * orbitalSpeed + rand(-jitter, jitter),
       mass,
-      radius: Math.max(1.4, Math.min(3.6, Math.sqrt(mass) * 1.2)),
+      radius: Math.max(5, Math.min(11, Math.sqrt(mass) * 3.8)),
       fixed: false,
     });
   }
@@ -1429,6 +1430,7 @@ export default function CellularAutomataDemo() {
   const [nbodyDamping, setNbodyDamping] = useState(NBODY_DEFAULTS.damping);
   const [nbodySoftening, setNbodySoftening] = useState(NBODY_DEFAULTS.softening);
   const [nbodyMaxSpeed, setNbodyMaxSpeed] = useState(NBODY_DEFAULTS.maxSpeed);
+  const [nbodyCentralBody, setNbodyCentralBody] = useState(true);
   const [sharkEnabled, setSharkEnabled] = useState(true);
   const [slimeCount, setSlimeCount] = useState(9000);
   const [slimeSensorAngle, setSlimeSensorAngle] = useState(0.52);
@@ -2259,6 +2261,7 @@ export default function CellularAutomataDemo() {
       nbodyRef.current = makeNBodySystem(nbodyCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, {
         gravity: nbodyGravity,
         ...(preset || {}),
+        centralBody: nbodyCentralBody,
       });
       nbodyTrailsRef.current = [];
     } else if (mode === "slime") {
@@ -2442,6 +2445,7 @@ export default function CellularAutomataDemo() {
       nbodyRef.current = makeNBodySystem(nbodyCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, {
         gravity: nbodyGravity,
         ...(preset || {}),
+        centralBody: nbodyCentralBody,
       });
       nbodyTrailsRef.current = [];
     } else if (nextMode === "slime") {
@@ -2498,7 +2502,7 @@ export default function CellularAutomataDemo() {
       preset.count,
       cv?.width || GRID_COLS * CELL,
       cv?.height || GRID_ROWS * CELL,
-      preset
+      { ...preset, centralBody: nbodyCentralBody }
     );
     nbodyTrailsRef.current = [];
     draw(gridRef.current);
@@ -2535,6 +2539,7 @@ export default function CellularAutomataDemo() {
         width={canvasW}
         height={canvasH}
         onContextMenu={(e) => e.preventDefault()}
+        onMouseDown={(e) => e.preventDefault()}
         onPointerDown={(e) => {
           e.currentTarget.setPointerCapture(e.pointerId);
           drawingRef.current = true;
@@ -2576,6 +2581,24 @@ export default function CellularAutomataDemo() {
                 if ((!mask || mask[idx] === 1) && slimeFieldRef.current[idx] !== undefined) slimeFieldRef.current[idx] += 16;
               }
             }
+          } else if (mode === "nbody") {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const sx = e.currentTarget.width / rect.width;
+            const sy = e.currentTarget.height / rect.height;
+            const x = (e.clientX - rect.left) * sx;
+            const y = (e.clientY - rect.top) * sy;
+            const mass = rand(0.8, 3.6);
+            nbodyRef.current = [...nbodyRef.current, {
+              x, y,
+              vx: rand(-1, 1),
+              vy: rand(-1, 1),
+              mass,
+              radius: Math.max(5, Math.min(11, Math.sqrt(mass) * 3.8)),
+              fixed: false,
+            }];
+            nbodyTrailsRef.current = nbodyRef.current.map((_, i) => nbodyTrailsRef.current[i] || []);
+            draw(gridRef.current);
+            drawingRef.current = false;
           } else if (mode === "pathfinding") {
             drawingRef.current = false;
           } else {
@@ -2966,6 +2989,7 @@ export default function CellularAutomataDemo() {
                 nbodyDamping={nbodyDamping} setNbodyDamping={setNbodyDamping}
                 nbodySoftening={nbodySoftening} setNbodySoftening={setNbodySoftening}
                 nbodyMaxSpeed={nbodyMaxSpeed} setNbodyMaxSpeed={setNbodyMaxSpeed}
+                nbodyCentralBody={nbodyCentralBody}
                 slimeCount={slimeCount} setSlimeCount={setSlimeCount}
                 slimeSensorAngle={slimeSensorAngle} setSlimeSensorAngle={setSlimeSensorAngle}
                 slimeSensorDist={slimeSensorDist} setSlimeSensorDist={setSlimeSensorDist}
@@ -3009,7 +3033,21 @@ export default function CellularAutomataDemo() {
                   nbodyRef.current = makeNBodySystem(nbodyCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, {
                     gravity: nbodyGravity,
                     ...(preset || {}),
+                    centralBody: nbodyCentralBody,
                   });
+                  draw(gridRef.current);
+                }}
+                toggleNbodyCentralBody={() => {
+                  const next = !nbodyCentralBody;
+                  setNbodyCentralBody(next);
+                  const cv = canvasRef.current;
+                  const preset = NBODY_PRESETS.find((p) => p.id === nbodyPreset) || null;
+                  nbodyRef.current = makeNBodySystem(nbodyCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, {
+                    gravity: nbodyGravity,
+                    ...(preset || {}),
+                    centralBody: next,
+                  });
+                  nbodyTrailsRef.current = [];
                   draw(gridRef.current);
                 }}
                 onClose={() => setSheet(null)}
@@ -3190,6 +3228,7 @@ function RulesSheet({
   boidShape, setBoidShape, sharkEnabled, setSharkEnabled,
   nbodyPreset, setNbodyPreset, applyNBodyPreset,
   nbodyCount, setNbodyCount, nbodyGravity, setNbodyGravity, nbodyDamping, setNbodyDamping, nbodySoftening, setNbodySoftening, nbodyMaxSpeed, setNbodyMaxSpeed,
+  nbodyCentralBody,
   slimeCount, setSlimeCount, slimeSensorAngle, setSlimeSensorAngle, slimeSensorDist, setSlimeSensorDist,
   slimeTurnSpeed, setSlimeTurnSpeed, slimeSpeed, setSlimeSpeed, slimeDeposit, setSlimeDeposit,
   slimeDecay, setSlimeDecay, slimeDiffuse, setSlimeDiffuse, slimeWiggle, setSlimeWiggle,
@@ -3197,7 +3236,7 @@ function RulesSheet({
   slimeCheckpointPct, setSlimeCheckpointPct, slimeRestartPct, setSlimeRestartPct,
   slimeAutoLoop, setSlimeAutoLoop, slimeCheckpointReady, slimeDebugFlow, setSlimeDebugFlow, slimeDebugStats, saveSlimeCheckpointNow, replaySlimeCheckpoint, loadUTestMaze, regenerateSlimeMaze,
   pathAlgo, setPathAlgo, pathCompareMode, setPathCompareMode, pathMazeLevel, setPathMazeLevel, pathSolved, regeneratePathMaze, loadPathUTestMaze,
-  onResetBoids, onResetNBody, reinitBoids, reinitNBody, onClose,
+  onResetBoids, onResetNBody, reinitBoids, reinitNBody, toggleNbodyCentralBody, onClose,
 }) {
   return (
     <div>
@@ -3370,6 +3409,12 @@ function RulesSheet({
             onClick={onResetNBody}
             className="w-full py-2 rounded-xl bg-slate-700 text-xs font-semibold text-white active:scale-95 transition"
           >Reset N-Body Defaults</button>
+          <button
+            onClick={toggleNbodyCentralBody}
+            className={`w-full py-2 rounded-xl text-xs font-semibold active:scale-95 transition ${
+              nbodyCentralBody ? "bg-slate-100 text-slate-900" : "bg-slate-800 text-slate-200"
+            }`}
+          >{nbodyCentralBody ? "Central Body: On" : "Central Body: Off"}</button>
           <div className="grid grid-cols-3 gap-1.5">
             {NBODY_COUNTS.map((count) => (
               <button
