@@ -177,6 +177,8 @@ const PALETTES = [
   { id: "inferno", label: "Inferno", colors: ["#000004","#1b0c41","#4a0c6b","#781c6d","#a52c60","#cf4446","#ed6925","#fb9b06","#f7d13d"] },
   { id: "magma",   label: "Magma",   colors: ["#000004","#180f3d","#440f76","#721f81","#9e2f7f","#cd4071","#f1605d","#fd9567","#feca8d"] },
   { id: "cividis", label: "Cividis", colors: ["#00224e","#123570","#3b496c","#575d6d","#707173","#8a8678","#a59c74","#c3b369","#e5cc5c"] },
+  { id: "turbo",   label: "Turbo",   colors: ["#30123b","#4145ab","#4675ed","#39a2fc","#1bcfd4","#24eca6","#61fc6c","#b7e336","#f9ba38"] },
+  { id: "spectral",label: "Spectral",colors: ["#9e0142","#d53e4f","#f46d43","#fdae61","#fee08b","#e6f598","#abdda4","#66c2a5","#3288bd"] },
 ];
 
 // ─── Viewport helpers ──────────────────────────────────────────
@@ -1271,12 +1273,11 @@ export default function CellularAutomataDemo() {
   const [slimeAwaitingStart, setSlimeAwaitingStart] = useState(false);
   const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
 
-  const SPEED_LABELS = ["⅓×", "1×", "2×", "4×"];
-  const SPEED_FACTORS = [1 / 3, 1, 2, 4];
+  const SPEED_LABELS = ["½×", "1×", "2×", "4×"];
+  const SPEED_FACTORS = [0.5, 1, 2, 4];
   const ZOOM_OPTIONS = [
     { label: "3×",   v: 3 },
     { label: "2×",   v: 2 },
-    { label: "1.5×", v: 1.5 },
     { label: "1×",   v: 1 },
     { label: "¾×",   v: 0.75 },
     { label: "½×",   v: 0.5 },
@@ -2619,7 +2620,7 @@ export default function CellularAutomataDemo() {
           </div>
         ) : (
           <div className="flex flex-col items-center p-[3px] rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10">
-            {["4×", "2×", "1×", "⅓×"].map((label, i) => {
+            {["4×", "2×", "1×", "½×"].map((label, i) => {
               const idx = 3 - i;
               return (
                 <button
@@ -2714,7 +2715,7 @@ export default function CellularAutomataDemo() {
                 active={sheet === "rules"} activeColor="bg-yellow-600"
               ><SlidersIcon /></HudIcon>}
               <HudIcon onClick={() => setSheet("color")} title="Color"
-                active={sheet === "color" || colorPaletteId !== null} activeColor="bg-orange-500"
+                active={sheet === "color"} activeColor="bg-orange-500"
               ><PaletteIcon /></HudIcon>
         </div>
       </div>
@@ -3310,10 +3311,10 @@ function ColorSheet({ mode, boidColorMode, setBoidColorMode, colorPaletteId, sel
           </div>
         </div>
       )}
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-3 auto-rows-fr gap-2">
         <button
           onClick={() => selectPalette(null)}
-          className={`p-2.5 rounded-2xl bg-slate-800 active:scale-95 transition ${colorPaletteId === null ? "ring-2 ring-white/40" : ""}`}
+          className={`h-full p-2.5 rounded-2xl bg-slate-800 active:scale-95 transition ${colorPaletteId === null ? "ring-2 ring-white/40" : ""}`}
         >
           <div className="flex gap-0.5 mb-1.5">
             {[0.25, 0.45, 0.65, 0.82, 1].map((op, i) => (
@@ -3326,7 +3327,7 @@ function ColorSheet({ mode, boidColorMode, setBoidColorMode, colorPaletteId, sel
           <button
             key={p.id}
             onClick={() => selectPalette(p)}
-            className={`p-2.5 rounded-2xl bg-slate-800 active:scale-95 transition ${colorPaletteId === p.id ? "ring-2 ring-white/40" : ""}`}
+            className={`h-full p-2.5 rounded-2xl bg-slate-800 active:scale-95 transition ${colorPaletteId === p.id ? "ring-2 ring-white/40" : ""}`}
           >
             <div className="flex gap-0.5 mb-1.5">
               {[0, 2, 4, 6, 8].map(i => (
