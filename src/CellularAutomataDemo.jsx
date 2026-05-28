@@ -23,8 +23,24 @@ const CELL = 5;
 const OFF = 0;
 const ON = 1;
 const DYING = 2;
-const MODE_ORDER = ["brian", "conway", "boids", "slime", "nbody"];
+const WIRE_EMPTY = 0;
+const WIRE_CONDUCTOR = 1;
+const WIRE_HEAD = 2;
+const WIRE_TAIL = 3;
+const MODE_ORDER = ["brian", "conway", "wireworld", "langton", "boids", "slime", "nbody"];
 const PATH_REPLAY_DURATION_MS = 500;
+const LANGTON_DEFAULT_RULE = "RL";
+const LANGTON_COLOR_FALLBACK = [
+  "#f8fafc",
+  "#38bdf8",
+  "#a78bfa",
+  "#34d399",
+  "#fbbf24",
+  "#f97316",
+  "#ef4444",
+  "#f472b6",
+  "#22d3ee",
+];
 const BOID_DEFAULTS = {
   count: 180,
   vision: 44,
@@ -137,6 +153,634 @@ const PATTERNS = {
   neuralNetwork: [[1,0,0,0,1,0,0,0,1],[0,2,0,2,0,2,0,2,0],[0,0,1,0,0,0,1,0,0],[0,2,0,2,0,2,0,2,0],[1,0,0,0,1,0,0,0,1]],
 };
 
+const PRESETS = [
+  { id: "conway",    label: "Conway",      rule: "B3/S23",         birth: [3],        survive: [2, 3] },
+  { id: "highlife",  label: "HighLife",    rule: "B36/S23",        birth: [3, 6],     survive: [2, 3] },
+  { id: "seeds",     label: "Seeds",       rule: "B2/S—",          birth: [2],        survive: [] },
+  { id: "daynight",  label: "Day & Night", rule: "B3678/S34678",   birth: [3,6,7,8],  survive: [3,4,6,7,8] },
+];
+
+const PALETTES = [
+  { id: "heat",   label: "Heat",   colors: ["#0f4c75","#1565c0","#38bdf8","#34d399","#fbbf24","#f97316","#ef4444","#dc2626","#9f1239"] },
+  { id: "viridis", label: "Viridis", colors: ["#440154","#482475","#414487","#355f8d","#2a788e","#21918c","#22a884","#44bf70","#7ad151"] },
+  { id: "plasma",  label: "Plasma",  colors: ["#0d0887","#46039f","#7201a8","#9c179e","#bd3786","#d8576b","#ed7953","#fb9f3a","#fdca26"] },
+  { id: "inferno", label: "Inferno", colors: ["#000004","#1b0c41","#4a0c6b","#781c6d","#a52c60","#cf4446","#ed6925","#fb9b06","#f7d13d"] },
+  { id: "magma",   label: "Magma",   colors: ["#000004","#180f3d","#440f76","#721f81","#9e2f7f","#cd4071","#f1605d","#fd9567","#feca8d"] },
+  { id: "cividis", label: "Cividis", colors: ["#00224e","#123570","#3b496c","#575d6d","#707173","#8a8678","#a59c74","#c3b369","#e5cc5c"] },
+  { id: "turbo",   label: "Turbo",   colors: ["#30123b","#4145ab","#4675ed","#39a2fc","#1bcfd4","#24eca6","#61fc6c","#b7e336","#f9ba38"] },
+  { id: "spectral",label: "Spectral",colors: ["#9e0142","#d53e4f","#f46d43","#fdae61","#fee08b","#e6f598","#abdda4","#66c2a5","#3288bd"] },
+];
+
+const WIREWORLD_THEMES = [
+  { id: "classic", label: "Classic Circuit", colors: { empty: "#07111d", conductor: "#d4a14a", head: "#38bdf8", tail: "#f97316" } },
+  { id: "neon", label: "Neon Grid", colors: { empty: "#050816", conductor: "#c084fc", head: "#22d3ee", tail: "#f43f5e" } },
+  { id: "amber", label: "Amber Terminal", colors: { empty: "#0d0a05", conductor: "#fbbf24", head: "#fde68a", tail: "#fb923c" } },
+  { id: "ice", label: "Ice Signal", colors: { empty: "#06111a", conductor: "#7dd3fc", head: "#f8fafc", tail: "#38bdf8" } },
+  { id: "mono", label: "Mono Debug", colors: { empty: "#050505", conductor: "#a3a3a3", head: "#fafafa", tail: "#525252" } },
+  { id: "paper", label: "Paper Logic", colors: { empty: "#111827", conductor: "#ffffff", head: "#000000", tail: "#6b7280" } },
+];
+
+function sanitizeLangtonRule(rule) {
+  const cleaned = String(rule || "")
+    .toUpperCase()
+    .replace(/[^LR]/g, "");
+  return cleaned.length ? cleaned : LANGTON_DEFAULT_RULE;
+}
+
+function parseAsciiCells(lines, mapping) {
+  const height = lines.length;
+  const width = Math.max(...lines.map((line) => line.length));
+  const cells = [];
+  for (let y = 0; y < lines.length; y++) {
+    const line = lines[y];
+    for (let x = 0; x < width; x++) {
+      const ch = line[x] || ".";
+      const state = mapping[ch];
+      if (state == null || state === 0) continue;
+      cells.push({ x, y, state });
+    }
+  }
+  return { width, height, cells };
+}
+
+function makePreset(modeId, id, name, description, category, payload = {}) {
+  return { id, modeId, name, description, category, ...payload };
+}
+
+const WIRE_ASCII = {
+  ".": WIRE_EMPTY,
+  c: WIRE_CONDUCTOR,
+  h: WIRE_HEAD,
+  t: WIRE_TAIL,
+};
+
+function makeWirePreset(id, name, description, category, lines) {
+  return makePreset("wireworld", id, name, description, category, {
+    variant: "live",
+    ...parseAsciiCells(lines, WIRE_ASCII),
+  });
+}
+
+function makeWireBlueprint(id, name, description, category, lines) {
+  return makePreset("wireworld", id, name, description, category, {
+    variant: "static",
+    ...parseAsciiCells(lines, WIRE_ASCII),
+  });
+}
+
+function makeWirePresetFromMatrix(id, name, description, category, matrix, source = null) {
+  const height = matrix.length;
+  const width = Math.max(...matrix.map((row) => row.length));
+  const cells = [];
+  for (let y = 0; y < matrix.length; y++) {
+    for (let x = 0; x < matrix[y].length; x++) {
+      const raw = matrix[y][x];
+      let state = WIRE_EMPTY;
+      if (raw === 3) state = WIRE_CONDUCTOR;
+      else if (raw === 1) state = WIRE_HEAD;
+      else if (raw === 2) state = WIRE_TAIL;
+      if (state !== WIRE_EMPTY) cells.push({ x, y, state });
+    }
+  }
+  return makePreset("wireworld", id, name, description, category, {
+    variant: "live",
+    width,
+    height,
+    cells,
+    source,
+  });
+}
+
+function makeWireBlueprintFromPreset(preset, id, name, description = null) {
+  return {
+    ...preset,
+    id,
+    name,
+    description: description || `Static blueprint of ${preset.name}.`,
+    variant: "static",
+    cells: (preset.cells || []).map((cell) => ({
+      ...cell,
+      state: cell.state === WIRE_EMPTY ? WIRE_EMPTY : WIRE_CONDUCTOR,
+    })),
+  };
+}
+
+function withPresetMeta(preset, extra) {
+  return { ...preset, ...extra };
+}
+
+function makeLangtonPreset({
+  id,
+  name,
+  description,
+  category,
+  rule = LANGTON_DEFAULT_RULE,
+  ants = [],
+  cells = [],
+  width = 1,
+  height = 1,
+  options = {},
+}) {
+  return makePreset("langton", id, name, description, category, {
+    rule: sanitizeLangtonRule(rule),
+    ants,
+    cells,
+    width,
+    height,
+    options,
+  });
+}
+
+const WIREWORLD_PRESETS = [
+  makeWirePreset("wireStraight", "Straight Pulse", "A clean wire carrying one moving electron.", "Basic", [
+    "ccccchtcccccccc",
+  ]),
+  makeWirePreset("wireCorner", "Corner Wire", "Signal rounds a right-angle bend.", "Basic", [
+    "....c",
+    "....c",
+    "....c",
+    "....c",
+    "htccc",
+  ]),
+  makeWirePreset("wireSplitter", "Splitter", "One pulse branches into two lanes.", "Basic", [
+    "..c..",
+    "..c..",
+    "..c..",
+    "htccc",
+    "..c.c",
+    "..c.c",
+    "..c.c",
+  ]),
+  makeWirePreset("wireLoop", "Loop Oscillator", "A looping pulse that keeps circulating.", "Basic", [
+    ".cccccc.",
+    "c......c",
+    "c......c",
+    "c......c",
+    "c......c",
+    "htccccc.",
+  ]),
+  makeWirePreset("wirePulseGen", "Pulse Generator", "Loop clock feeding a straight output wire.", "Basic", [
+    ".cccccc....",
+    "c......c...",
+    "c......c...",
+    "c......ccccc",
+    "c......c...",
+    "htccccc....",
+  ]),
+  makeWirePresetFromMatrix("wireDiodesDoc", "Dual Diodes", "Documented diode pair: top conducts, bottom blocks in reverse.", "Logic", [
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 0, 0],
+    [2, 1, 3, 3, 3, 3, 3, 0, 3, 3, 3, 3, 3, 3],
+    [0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 0, 0],
+    [2, 1, 3, 3, 3, 3, 0, 3, 3, 3, 3, 3, 3, 3],
+    [0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  ], "CellPyLib docs"),
+  makeWirePresetFromMatrix("wireXorDoc", "XOR Gate", "Documented XOR gate with two inputs and one output.", "Showcase", [
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 3, 1, 2, 3, 3, 3, 3, 1, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 3, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 3, 3, 3, 3, 2],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 0, 0, 0, 0],
+    [0, 0, 0, 3, 3, 2, 1, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0],
+    [0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  ], "CellPyLib docs"),
+  makeWirePreset("wireDiode", "One-Way Diode", "Asymmetric routing that behaves like a diode-like filter.", "Logic", [
+    ".....c.....",
+    "....ccc....",
+    "htccccccc..",
+    "....ccc.ccc",
+    ".....c.....",
+  ]),
+  makeWirePreset("wireAnd", "AND Gate", "Two incoming pulses meet before the shared output lane.", "Logic", [
+    "c........c",
+    "c........c",
+    "tc......ht",
+    ".hccc.ccc.",
+    "....ccc...",
+    ".....c....",
+    ".....c....",
+  ]),
+  makeWirePreset("wireOr", "OR Gate", "Either branch can feed the output spine.", "Logic", [
+    "c........c",
+    "c........c",
+    "tc......ht",
+    ".hccccccc.",
+    "...c...c..",
+    "...c...c..",
+    "...ccccc..",
+  ]),
+  makeWirePreset("wireMerge", "Signal Merge", "Two pulses converge into one shared trunk.", "Logic", [
+    "c.......c",
+    "c.......c",
+    "tc.....ht",
+    ".hcccccc.",
+    "....c....",
+    "....c....",
+    "....c....",
+  ]),
+  makeWirePreset("wireFork", "Signal Fork", "One channel fans out into mirrored exits.", "Logic", [
+    "....c....",
+    "....c....",
+    "....c....",
+    "htccccccc",
+    "....c....",
+    "..ccc....",
+    ".c...c...",
+  ]),
+  makeWirePreset("wireClock", "Clock Loop", "Closed loop with taps to watch periodic timing.", "Logic", [
+    ".cccccccc.",
+    "c........c",
+    "c.cc..cc.c",
+    "c.c....c.c",
+    "c.cc..cc.c",
+    "htccccccc.",
+  ]),
+  makeWirePreset("wireGarden", "Cyber Circuit Garden", "A decorative motherboard patch full of live pulses.", "Showcase", [
+    "..c......cccccc....",
+    "..c......c....c....",
+    "..c......c....c....",
+    "htcccccccc....cccc.",
+    "..c......c....c..c.",
+    "..c..cccccccccc..c.",
+    "..c..c....c....c.c.",
+    "..cccc....c....ccc.",
+  ]),
+  makeWirePreset("wireFoundry", "Signal Foundry", "A large ready-made motherboard scene with twin clocks, buses, forks, and merges.", "Showcase", [
+    "................................................................",
+    "..cccccccccc......................cccccccccc.....................",
+    "..c........c......................c........c.....................",
+    "..c........c.....cccccccccccc.....c........c.....................",
+    "..c........ccccccc..........ccccccc........c.....................",
+    "..c........c.....c..........c.....c........c.....................",
+    "..htcccccccc.....c....cccc..c.....cccccccccc......cccccccc.......",
+    "............cccccc....c..c..c.............cccccccc......c.......",
+    "................c.....c..c..c.............c.............c.......",
+    "..cccccccc......c.....cccc..cccccccc......c....cccccccccc.......",
+    "..c......c.......cccccc...........c........c....c................",
+    "..c......c............c...........c........c....c................",
+    "..c......cccccccc.....c....cccccccc........cccccc................",
+    "..c......c......c.....c....c..................c..................",
+    "..htcccccc......c.....c....c..................c..................",
+    ".................cccccc....cccccccccccc.......c..................",
+    "......................c...............c.......c..................",
+    "..............cccccccccccc............c....cccccccccc............",
+    "..............c...........c............cccccc........c............",
+    "..............c...........cccccccccccccc.............c............",
+    "..............c...........c............ccccccccccccccc............",
+    "..............ccccccccccccc.......................................",
+    "................................................................",
+  ]),
+  makeWirePreset("wireGrandBoard", "Grand Logic Board", "A larger balanced board with mirrored clocks, buses, forks, and a central gate spine.", "Showcase", [
+    "................................................................................",
+    "..cccccccccc............................cccccccccc...............................",
+    "..c........c............................c........c...............................",
+    "..c........c......cccccccccccccccc......c........c...............................",
+    "..c........cccccccc..............cccccccc........c...............................",
+    "..c........c......c..............c......c........c...............................",
+    "..htcccccccc......c....cccccc....c......cccccccccc...........cccccccccc.........",
+    ".................cccccc....ccccccc.............ccccccccccccccc........c.........",
+    ".....................c......c...c..............c.............c........c.........",
+    ".....cccccccccc......c......c...c......cccccc..c..cccccccc...c........c.........",
+    ".....c........c......cccccccc...cccccccc....cccccc......c....cccccccccc.........",
+    ".....c........c...........c...............c....c........c...........c...........",
+    ".....c........cccccccc....c....cccccccc...c....c........cccccccc....c...........",
+    ".....c........c......c....c....c......c...c....c........c......c....c...........",
+    ".....htcccccccc......c....cccccc......cccccc....cccccccccc......cccccc...........",
+    "......................c........c......c...c.............c........c...............",
+    "....cccccccccccc......c........cccccccc...cccccccc......c........c......cccccc...",
+    "....c..........c......cccccccccc......c...c......c......cccccccccc......c....c...",
+    "....c..........cccccccc...............c...c......cccccccc...............c....c...",
+    "....c..........c......c......cccccccccc...cccccccc......c......cccccccccc....c...",
+    "....htcccccccccc......c......c....................c......c......c.............c...",
+    "......................cccccccc....................cccccccc......ccccccccccccccc...",
+    "................................................................................",
+  ]),
+  makeWirePreset("wireDisplayRig", "Pulse Display Rig", "Clocked signal board with a display-like front end and visibly staggered pulse lanes.", "Showcase", [
+    "........................................................................",
+    "..cccccccccc....................cccccccccc...............................",
+    "..c........c....................c........c...............................",
+    "..c........cccccccc......cccccccc........c...........cccccccccccc........",
+    "..c........c......c......c......c........c...........c..........c........",
+    "..htcccccccc......cccccccc......cccccccccc...........c..cccccc..c........",
+    ".................c......c......c.....................c..c....c..c........",
+    ".................c......c......c......cccccccccc.....c..c....c..c........",
+    "..cccccccccc.....cccccccc......cccccccc........c.....c..cccccc..c........",
+    "..c........c...........c..........c.............c.....c..........c........",
+    "..c........cccccccc....c....cccc..c....cccccc...c.....cccccccccccc........",
+    "..c........c......c....c....c..c..c....c....c...c...........c.............",
+    "..htcccccccc......cccccc....c..c..cccccc....cccccc...........c.............",
+    ".................c..........c..c..c..............c.....cccccccccccc........",
+    ".................c....ccccccc..c..c....cccccc....c.....c..........c........",
+    ".....cccccccc....c....c........c..c....c....c....c.....c..cccccc..c........",
+    ".....c......c....cccccc........c..cccccc....cccccc.....c..c....c..c........",
+    ".....c......c.........c........c...............c........c..cccccc..c........",
+    ".....htcccccc.........cccccccccc...............c........c..........c........",
+    "...............................................cccccccccccccccccccccc........",
+    "........................................................................",
+  ]),
+  makeWirePreset("wireMaze", "Pulse Maze", "A long routed maze with a traveling head.", "Showcase", [
+    "ccccccccccccccc.",
+    "............c.c.",
+    ".cccccccccc.c.c.",
+    ".c........c.c.c.",
+    ".c.ccccccc.c.c.",
+    ".c.c.....c.c.c.",
+    ".c.c.ccccc.c.c.",
+    ".htc.c.......c.",
+    "..ccccccccccccc",
+  ]),
+];
+
+function ringAnts(count, radius, startDir = 0, color = "#f8fafc") {
+  const ants = [];
+  for (let i = 0; i < count; i++) {
+    const a = (i / count) * Math.PI * 2;
+    ants.push({
+      x: Math.round(Math.cos(a) * radius),
+      y: Math.round(Math.sin(a) * radius),
+      dir: (startDir + i) % 4,
+      color,
+    });
+  }
+  return ants;
+}
+
+const LANGTON_PRESETS = [
+  makeLangtonPreset({
+    id: "antClassic",
+    name: "Single Classic Ant",
+    description: "The canonical RL ant that eventually builds a highway.",
+    category: "Basic",
+    rule: "RL",
+    ants: [{ x: 0, y: 0, dir: 0, color: "#f8fafc" }],
+  }),
+  makeLangtonPreset({
+    id: "antFour",
+    name: "Four Symmetric Ants",
+    description: "Mirrored ants radiate from the center in balance.",
+    category: "Basic",
+    rule: "RL",
+    ants: [
+      { x: -4, y: 0, dir: 1, color: "#38bdf8" },
+      { x: 4, y: 0, dir: 3, color: "#f472b6" },
+      { x: 0, y: -4, dir: 2, color: "#fbbf24" },
+      { x: 0, y: 4, dir: 0, color: "#34d399" },
+    ],
+    width: 9,
+    height: 9,
+  }),
+  makeLangtonPreset({
+    id: "antCorners",
+    name: "Ants from Corners",
+    description: "Four ants rush inward from offset corners.",
+    category: "Basic",
+    rule: "RL",
+    ants: [
+      { x: -10, y: -10, dir: 1, color: "#38bdf8" },
+      { x: 10, y: -10, dir: 2, color: "#fbbf24" },
+      { x: -10, y: 10, dir: 0, color: "#34d399" },
+      { x: 10, y: 10, dir: 3, color: "#f472b6" },
+    ],
+    width: 21,
+    height: 21,
+  }),
+  makeLangtonPreset({
+    id: "antCollision",
+    name: "Ant Collision Test",
+    description: "Opposing ants collide through the same lane.", 
+    category: "Basic",
+    rule: "RL",
+    ants: [
+      { x: -8, y: 0, dir: 1, color: "#f8fafc" },
+      { x: 8, y: 0, dir: 3, color: "#f97316" },
+      { x: 0, y: -8, dir: 2, color: "#22d3ee" },
+      { x: 0, y: 8, dir: 0, color: "#a78bfa" },
+    ],
+    width: 17,
+    height: 17,
+  }),
+  makeLangtonPreset({
+    id: "antHighway",
+    name: "Highway Starter",
+    description: "Classic RL seeded just off-center for a quick highway build.",
+    category: "Beautiful",
+    rule: "RL",
+    ants: [{ x: -3, y: 2, dir: 1, color: "#f8fafc" }],
+    width: 7,
+    height: 7,
+  }),
+  makeLangtonPreset({
+    id: "antSpiralChaos",
+    name: "Spiral Chaos",
+    description: "RLLR rule with a tight spiral of ants.",
+    category: "Beautiful",
+    rule: "RLLR",
+    ants: ringAnts(6, 5, 0, "#38bdf8"),
+    width: 13,
+    height: 13,
+  }),
+  makeLangtonPreset({
+    id: "antMandala",
+    name: "Mandala Ants",
+    description: "Symmetric launch that blooms into a mandala-like field.",
+    category: "Beautiful",
+    rule: "LLRR",
+    ants: ringAnts(8, 8, 0, "#fbbf24"),
+    width: 17,
+    height: 17,
+  }),
+  makeLangtonPreset({
+    id: "antSwarmCross",
+    name: "Swarm Cross",
+    description: "A dense cross of ants with varied headings.",
+    category: "Beautiful",
+    rule: "RLR",
+    ants: [
+      { x: -8, y: 0, dir: 1, color: "#38bdf8" },
+      { x: -4, y: 0, dir: 1, color: "#7dd3fc" },
+      { x: 4, y: 0, dir: 3, color: "#f472b6" },
+      { x: 8, y: 0, dir: 3, color: "#fb7185" },
+      { x: 0, y: -8, dir: 2, color: "#fbbf24" },
+      { x: 0, y: -4, dir: 2, color: "#fde68a" },
+      { x: 0, y: 4, dir: 0, color: "#34d399" },
+      { x: 0, y: 8, dir: 0, color: "#86efac" },
+    ],
+    width: 17,
+    height: 17,
+  }),
+  makeLangtonPreset({
+    id: "antMirror",
+    name: "Mirror Ants",
+    description: "Paired ants mirror each other across the center line.",
+    category: "Beautiful",
+    rule: "LLRR",
+    ants: [
+      { x: -6, y: -2, dir: 1, color: "#f8fafc" },
+      { x: 6, y: -2, dir: 3, color: "#f8fafc" },
+      { x: -6, y: 2, dir: 1, color: "#a78bfa" },
+      { x: 6, y: 2, dir: 3, color: "#a78bfa" },
+    ],
+    width: 13,
+    height: 9,
+  }),
+  makeLangtonPreset({
+    id: "antOrbit",
+    name: "Orbit Ants",
+    description: "A colored ring of ants with clockwise momentum.",
+    category: "Beautiful",
+    rule: "LRRRRRLLR",
+    ants: ringAnts(10, 10, 1, "#22d3ee"),
+    width: 21,
+    height: 21,
+  }),
+  makeLangtonPreset({
+    id: "antDenseChaos",
+    name: "Dense Center Chaos",
+    description: "Many ants start packed in the middle for fast chaos.",
+    category: "Beautiful",
+    rule: "LLRRRLR",
+    ants: [
+      { x: -2, y: -2, dir: 0, color: "#f8fafc" },
+      { x: 0, y: -2, dir: 1, color: "#22d3ee" },
+      { x: 2, y: -2, dir: 2, color: "#f472b6" },
+      { x: -2, y: 0, dir: 3, color: "#fbbf24" },
+      { x: 0, y: 0, dir: 0, color: "#34d399" },
+      { x: 2, y: 0, dir: 1, color: "#a78bfa" },
+      { x: -2, y: 2, dir: 2, color: "#fb7185" },
+      { x: 0, y: 2, dir: 3, color: "#7dd3fc" },
+      { x: 2, y: 2, dir: 0, color: "#fde68a" },
+    ],
+    width: 7,
+    height: 7,
+  }),
+];
+
+const WIREWORLD_ORTHO_PRESETS = [
+  withPresetMeta(
+    makeWirePreset("wireBatteryCell", "Battery Cell", "Orthogonal-only pulse source: a circulating cell with an output lead.", "Orthogonal Only", [
+      "....cccccc..........",
+      "....c....c..........",
+      "....c....c..........",
+      "htccc....ccccccccccc",
+      "....c....c..........",
+      "....c....c..........",
+      "....cccccc..........",
+    ]),
+    { ruleSet: "orthogonal" }
+  ),
+  withPresetMeta(
+    makeWirePreset("wireOrthoStraight", "Ortho Straight Pulse", "A clean single-pass pulse that uses only horizontal wiring.", "Orthogonal Only", [
+      "htcccccccccccccc",
+    ]),
+    { ruleSet: "orthogonal" }
+  ),
+  withPresetMeta(
+    makeWirePreset("wireOrthoCorner", "Ortho Corner Pulse", "A right-angle pulse path that stays fully orthogonal.", "Orthogonal Only", [
+      ".....c",
+      ".....c",
+      ".....c",
+      ".....c",
+      "htcccc",
+    ]),
+    { ruleSet: "orthogonal" }
+  ),
+  withPresetMeta(
+    makeWirePreset("wireOrthoClock", "Ortho Clock Loop", "A rectangular oscillator tuned for the orthogonal-only experimental rule.", "Orthogonal Only", [
+      ".ccccccc.",
+      "c.......c",
+      "c.......c",
+      "c.......c",
+      "c.......c",
+      "htcccccc.",
+    ]),
+    { ruleSet: "orthogonal" }
+  ),
+];
+
+const WIREWORLD_BLUEPRINT_PRESETS = [
+  makeWireBlueprint(
+    "wireColumnBusBlueprint",
+    "Column Bus Blueprint",
+    "Vertical columns 20 cells tall, spaced by one gap, without the bottom bus.",
+    "Static Blueprint",
+    [
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+      "c.c.c.c.c.c.c.c.c.c.c.c",
+    ]
+  ),
+  makeWireBlueprintFromPreset(
+    WIREWORLD_PRESETS.find((preset) => preset.id === "wireClock"),
+    "wireClockBlueprint",
+    "Clock Blueprint",
+    "Static clock layout with conductors only."
+  ),
+  makeWireBlueprintFromPreset(
+    WIREWORLD_PRESETS.find((preset) => preset.id === "wireFoundry"),
+    "wireFoundryBlueprint",
+    "Foundry Blueprint",
+    "Static motherboard-style board without seeded pulses."
+  ),
+  makeWireBlueprintFromPreset(
+    WIREWORLD_PRESETS.find((preset) => preset.id === "wireGrandBoard"),
+    "wireGrandBoardBlueprint",
+    "Grand Board Blueprint",
+    "Large balanced board with conductors only."
+  ),
+  makeWireBlueprintFromPreset(
+    WIREWORLD_PRESETS.find((preset) => preset.id === "wireDisplayRig"),
+    "wireDisplayRigBlueprint",
+    "Display Rig Blueprint",
+    "Clock-and-display style blueprint without live pulses."
+  ),
+];
+
+const WIREWORLD_ALL_PRESETS = [...WIREWORLD_PRESETS, ...WIREWORLD_ORTHO_PRESETS, ...WIREWORLD_BLUEPRINT_PRESETS];
+
+const MODE_DESCRIPTIONS = {
+  brian: "Exactly two live neighbors ignite a three-state pulse.",
+  conway: "Birth and survival rules shape organic growth.",
+  wireworld: "Draw wires, electrons travel through conductors.",
+  langton: "Simple turn rules create chaos and highways.",
+  boids: "Separation, alignment, and cohesion drive flocking.",
+  slime: "Trails diffuse, decay, and steer emergent flow.",
+  nbody: "A few gravitating bodies sketch orbital trails.",
+};
+
+const PRESET_LIBRARY = Object.fromEntries(
+  [...WIREWORLD_ALL_PRESETS, ...LANGTON_PRESETS].map((preset) => [preset.id, preset])
+);
+
 const CATALOG = {
   conway: [
     { key: "glider",      label: "Glider",       color: "sky-400",    sub: "Moves diagonally" },
@@ -161,25 +805,19 @@ const CATALOG = {
     { key: "relayChain",    label: "Relay Chain",   color: "cyan-500",   sub: "Signal repeater" },
     { key: "neuralNetwork", label: "Network",       color: "orange-400", sub: "Neural grid" },
   ],
+  wireworld: WIREWORLD_ALL_PRESETS.map((preset, index) => ({
+    key: preset.id,
+    label: preset.name,
+    color: ["amber-500", "cyan-500", "orange-500", "violet-500", "lime-500"][index % 5],
+    sub: `${preset.variant === "static" ? "Static Blueprint" : "Live Circuit"}${preset.ruleSet === "orthogonal" ? " · Orthogonal Only" : ""} · ${preset.description}`,
+  })),
+  langton: LANGTON_PRESETS.map((preset, index) => ({
+    key: preset.id,
+    label: preset.name,
+    color: ["sky-500", "pink-500", "emerald-500", "amber-500", "violet-500"][index % 5],
+    sub: preset.description,
+  })),
 };
-
-const PRESETS = [
-  { id: "conway",    label: "Conway",      rule: "B3/S23",         birth: [3],        survive: [2, 3] },
-  { id: "highlife",  label: "HighLife",    rule: "B36/S23",        birth: [3, 6],     survive: [2, 3] },
-  { id: "seeds",     label: "Seeds",       rule: "B2/S—",          birth: [2],        survive: [] },
-  { id: "daynight",  label: "Day & Night", rule: "B3678/S34678",   birth: [3,6,7,8],  survive: [3,4,6,7,8] },
-];
-
-const PALETTES = [
-  { id: "heat",   label: "Heat",   colors: ["#0f4c75","#1565c0","#38bdf8","#34d399","#fbbf24","#f97316","#ef4444","#dc2626","#9f1239"] },
-  { id: "viridis", label: "Viridis", colors: ["#440154","#482475","#414487","#355f8d","#2a788e","#21918c","#22a884","#44bf70","#7ad151"] },
-  { id: "plasma",  label: "Plasma",  colors: ["#0d0887","#46039f","#7201a8","#9c179e","#bd3786","#d8576b","#ed7953","#fb9f3a","#fdca26"] },
-  { id: "inferno", label: "Inferno", colors: ["#000004","#1b0c41","#4a0c6b","#781c6d","#a52c60","#cf4446","#ed6925","#fb9b06","#f7d13d"] },
-  { id: "magma",   label: "Magma",   colors: ["#000004","#180f3d","#440f76","#721f81","#9e2f7f","#cd4071","#f1605d","#fd9567","#feca8d"] },
-  { id: "cividis", label: "Cividis", colors: ["#00224e","#123570","#3b496c","#575d6d","#707173","#8a8678","#a59c74","#c3b369","#e5cc5c"] },
-  { id: "turbo",   label: "Turbo",   colors: ["#30123b","#4145ab","#4675ed","#39a2fc","#1bcfd4","#24eca6","#61fc6c","#b7e336","#f9ba38"] },
-  { id: "spectral",label: "Spectral",colors: ["#9e0142","#d53e4f","#f46d43","#fdae61","#fee08b","#e6f598","#abdda4","#66c2a5","#3288bd"] },
-];
 
 // ─── Viewport helpers ──────────────────────────────────────────
 // zoom=1 → show BASE_ROWS×BASE_COLS (center of grid)
@@ -253,6 +891,71 @@ function stepBrain(g) {
     if (cell === ON) return DYING;
     return OFF;
   }));
+}
+
+function countWireHeads(g, r, c) {
+  let n = 0;
+  for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+    if (!dr && !dc) continue;
+    const nr = r + dr;
+    const nc = c + dc;
+    if (nr >= 0 && nr < GRID_ROWS && nc >= 0 && nc < GRID_COLS && g[nr][nc] === WIRE_HEAD) n++;
+  }
+  return n;
+}
+
+function countWireHeadsOrthogonal(g, r, c) {
+  let n = 0;
+  const neighbors = [
+    [r - 1, c],
+    [r + 1, c],
+    [r, c - 1],
+    [r, c + 1],
+  ];
+  for (const [nr, nc] of neighbors) {
+    if (nr >= 0 && nr < GRID_ROWS && nc >= 0 && nc < GRID_COLS && g[nr][nc] === WIRE_HEAD) n++;
+  }
+  return n;
+}
+
+function stepWireworld(g, orthogonalOnly = false) {
+  return g.map((row, r) => row.map((cell, c) => {
+    if (cell === WIRE_EMPTY) return WIRE_EMPTY;
+    if (cell === WIRE_HEAD) return WIRE_TAIL;
+    if (cell === WIRE_TAIL) return WIRE_CONDUCTOR;
+    const heads = orthogonalOnly ? countWireHeadsOrthogonal(g, r, c) : countWireHeads(g, r, c);
+    return heads === 1 || heads === 2 ? WIRE_HEAD : WIRE_CONDUCTOR;
+  }));
+}
+
+function makeLangtonAnt(x, y, dir = 0, color = "#f8fafc") {
+  return { x, y, dir, color };
+}
+
+function stepLangton(grid, ants, rule) {
+  const nextGrid = grid.map((row) => [...row]);
+  const turns = sanitizeLangtonRule(rule);
+  const stateCount = turns.length;
+  const nextAnts = ants.map((ant) => ({ ...ant }));
+  for (const ant of nextAnts) {
+    const x = ((ant.x % GRID_COLS) + GRID_COLS) % GRID_COLS;
+    const y = ((ant.y % GRID_ROWS) + GRID_ROWS) % GRID_ROWS;
+    const state = nextGrid[y][x] % stateCount;
+    const turn = turns[state];
+    ant.dir = turn === "L" ? (ant.dir + 3) % 4 : (ant.dir + 1) % 4;
+    nextGrid[y][x] = (state + 1) % stateCount;
+    if (ant.dir === 0) ant.y = y - 1;
+    else if (ant.dir === 1) ant.x = x + 1;
+    else if (ant.dir === 2) ant.y = y + 1;
+    else ant.x = x - 1;
+    ant.x = ((ant.x % GRID_COLS) + GRID_COLS) % GRID_COLS;
+    ant.y = ((ant.y % GRID_ROWS) + GRID_ROWS) % GRID_ROWS;
+  }
+  return { grid: nextGrid, ants: nextAnts };
+}
+
+function makeLangtonGrid(fill = 0) {
+  return Array.from({ length: GRID_ROWS }, () => Array(GRID_COLS).fill(fill));
 }
 
 function rand(min, max) {
@@ -567,6 +1270,74 @@ function hslToRgb(h, s, l) {
     g: Math.round((g1 + m) * 255),
     b: Math.round((b1 + m) * 255),
   };
+}
+
+function sampleLangtonStateColors(rule, paletteColors) {
+  const turns = sanitizeLangtonRule(rule);
+  const palette = (paletteColors && paletteColors.length ? paletteColors : LANGTON_COLOR_FALLBACK).map((c) => hexToRgb(c) || hexToRgb("#38bdf8"));
+  const out = [];
+  for (let i = 0; i < turns.length; i++) {
+    const color = palette[Math.round((i / Math.max(1, turns.length - 1)) * (palette.length - 1))];
+    out.push(color);
+  }
+  return out;
+}
+
+function applyStructuredPreset(baseGrid, preset, centerRow, centerCol, modeId) {
+  const next = baseGrid.map((row) => [...row]);
+  const width = preset.width || 1;
+  const height = preset.height || 1;
+  const rowStart = centerRow - Math.floor(height / 2);
+  const colStart = centerCol - Math.floor(width / 2);
+  for (const cell of preset.cells || []) {
+    const rr = rowStart + cell.y;
+    const cc = colStart + cell.x;
+    if (rr < 0 || rr >= GRID_ROWS || cc < 0 || cc >= GRID_COLS) continue;
+    next[rr][cc] = modeId === "langton" ? cell.state : cell.state;
+  }
+  return {
+    grid: next,
+    ants: (preset.ants || []).map((ant) =>
+      makeLangtonAnt(
+        Math.max(0, Math.min(GRID_COLS - 1, colStart + Math.floor(width / 2) + ant.x)),
+        Math.max(0, Math.min(GRID_ROWS - 1, rowStart + Math.floor(height / 2) + ant.y)),
+        ant.dir,
+        ant.color
+      )
+    ),
+  };
+}
+
+function makeRandomWireworldGrid() {
+  return Array.from({ length: GRID_ROWS }, () =>
+    Array.from({ length: GRID_COLS }, () => {
+      const r = Math.random();
+      if (r < 0.09) return WIRE_CONDUCTOR;
+      if (r < 0.094) return WIRE_HEAD;
+      if (r < 0.098) return WIRE_TAIL;
+      return WIRE_EMPTY;
+    })
+  );
+}
+
+function makeRandomLangtonAnts(count) {
+  return Array.from({ length: count }, (_, i) =>
+    makeLangtonAnt(
+      Math.floor(rand(0, GRID_COLS)),
+      Math.floor(rand(0, GRID_ROWS)),
+      Math.floor(rand(0, 4)),
+      LANGTON_COLOR_FALLBACK[(i + 1) % LANGTON_COLOR_FALLBACK.length]
+    )
+  );
+}
+
+function deEnergizeWireworldGrid(grid) {
+  return grid.map((row) =>
+    row.map((cell) => {
+      if (cell === WIRE_HEAD || cell === WIRE_TAIL) return WIRE_CONDUCTOR;
+      return cell;
+    })
+  );
 }
 
 function makeSlimeAgents(count, w, h) {
@@ -1272,6 +2043,17 @@ export default function CellularAutomataDemo() {
   const [slimeDebugStats, setSlimeDebugStats] = useState({ pressure: 0, moveUp: 0, below: 0, above: 0, space: 0, nonZero: 0, peak: 0, maxMoveUp: 0, upTransfers: 0, upVolume: 0 });
   const [slimeAwaitingStart, setSlimeAwaitingStart] = useState(false);
   const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
+  const [wireBrush, setWireBrush] = useState(WIRE_CONDUCTOR);
+  const [wirePresetId, setWirePresetId] = useState("wireStraight");
+  const [wireThemeId, setWireThemeId] = useState("classic");
+  const [wireOrthogonalOnly, setWireOrthogonalOnly] = useState(false);
+  const [wirePowerOff, setWirePowerOff] = useState(false);
+  const [langtonRule, setLangtonRule] = useState(LANGTON_DEFAULT_RULE);
+  const [langtonAntCount, setLangtonAntCount] = useState(1);
+  const [langtonPresetId, setLangtonPresetId] = useState("antClassic");
+  const [langtonShowDirections, setLangtonShowDirections] = useState(true);
+  const [langtonShowTrails, setLangtonShowTrails] = useState(true);
+  const [patternUndoCount, setPatternUndoCount] = useState(0);
 
   const SPEED_LABELS = ["½×", "1×", "2×", "4×"];
   const SPEED_FACTORS = [0.5, 1, 2, 4];
@@ -1291,7 +2073,6 @@ export default function CellularAutomataDemo() {
   }, []);
 
   useEffect(() => {
-    if (mode !== "brian" && mode !== "conway") return;
     if (!patternBrush) return;
     const allowed = new Set((CATALOG[mode] || []).map((item) => item.key));
     if (!allowed.has(patternBrush)) setPatternBrush(null);
@@ -1309,6 +2090,8 @@ export default function CellularAutomataDemo() {
   const gridRef = useRef(makeRandomGrid("brian"));
   const boidsRef = useRef(makeBoids(boidCount, GRID_COLS * CELL, GRID_ROWS * CELL, boidShape));
   const nbodyRef = useRef(makeNBodySystem(NBODY_DEFAULTS.count, GRID_COLS * CELL, GRID_ROWS * CELL));
+  const langtonAntsRef = useRef([makeLangtonAnt(Math.floor(GRID_COLS / 2), Math.floor(GRID_ROWS / 2), 0)]);
+  const langtonTrailsRef = useRef([]);
   const slimeAgentsRef = useRef([]);
   const slimeFieldRef = useRef(new Float32Array(0));
   const slimeSizeRef = useRef({ w: 0, h: 0 });
@@ -1326,7 +2109,11 @@ export default function CellularAutomataDemo() {
   const slimeFillRef = useRef(0);
   const flowProbeRef = useRef({ pressure: 0, space: 0, moveUp: 0, below: 0, above: 0 });
   const drawingRef = useRef(false);
+  const brushUndoStrokeRef = useRef(false);
   const patternHoldRef = useRef({ timer: null, fired: false, x: 0, y: 0 });
+  const patternPreviewRef = useRef({ active: false, x: 0, y: 0 });
+  const patternUndoRef = useRef([]);
+  const wirePowerSnapshotRef = useRef(null);
   const colorRef = useRef(null); // null = classic | colors array
   const zoomRef = useRef(1);    // mirror of zoom state for use inside closures
   const speedPressRef = useRef(null);
@@ -1471,6 +2258,21 @@ export default function CellularAutomataDemo() {
     setSlimeCheckpointReady(true);
   }
 
+  function getPatternPreviewRows() {
+    if (!patternBrush) return null;
+    if (PRESET_LIBRARY[patternBrush]) {
+      const preset = PRESET_LIBRARY[patternBrush];
+      const width = preset.width || 1;
+      const height = preset.height || 1;
+      const rows = Array.from({ length: height }, () => Array(width).fill(0));
+      for (const cell of preset.cells || []) {
+        if (rows[cell.y] && rows[cell.y][cell.x] != null) rows[cell.y][cell.x] = cell.state;
+      }
+      return rows;
+    }
+    return rotatePattern(PATTERNS[patternBrush], patternRotation);
+  }
+
   function replaySlimeCheckpoint() {
     const cp = slimeCheckpointRef.current;
     if (!cp) return;
@@ -1486,6 +2288,131 @@ export default function CellularAutomataDemo() {
     const cv = canvasRef.current;
     if (!cv) return;
     const ctx = cv.getContext("2d");
+    const drawPatternPreview = () => {
+      if (!patternPreviewRef.current.active || !patternBrush) return;
+      const rect = cv.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const rows = getPatternPreviewRows();
+      if (!rows) return;
+      const sx = cv.width / rect.width;
+      const sy = cv.height / rect.height;
+      const localX = (patternPreviewRef.current.x - rect.left) * sx;
+      const localY = (patternPreviewRef.current.y - rect.top) * sy;
+      const { visRows, visCols } = getViewport(zoomRef.current);
+      const vcol = Math.floor(localX / CELL);
+      const vrow = Math.floor(localY / CELL);
+      const cols = Math.max(...rows.map((row) => row.length));
+      const startCol = vcol - Math.floor(cols / 2);
+      const startRow = vrow - Math.floor(rows.length / 2);
+
+      for (let r = 0; r < rows.length; r++) {
+        for (let c = 0; c < cols; c++) {
+          const state = rows[r][c] || 0;
+          if (state === 0) continue;
+          const dc = startCol + c;
+          const dr = startRow + r;
+          if (dc < 0 || dr < 0 || dc >= visCols || dr >= visRows) continue;
+          let fill = "rgba(148,163,184,0.35)";
+          if (mode === "wireworld") {
+            const wireTheme = WIREWORLD_THEMES.find((theme) => theme.id === wireThemeId) || WIREWORLD_THEMES[0];
+            fill =
+              state === WIRE_CONDUCTOR ? `${wireTheme.colors.conductor}88` :
+              state === WIRE_HEAD ? `${wireTheme.colors.head}88` :
+              `${wireTheme.colors.tail}88`;
+          } else if (mode === "langton") {
+            fill = state === 0 ? "transparent" : "rgba(236,72,153,0.38)";
+          } else {
+            fill = state === ON ? "rgba(56,189,248,0.38)" : state === DYING ? "rgba(124,58,237,0.38)" : "rgba(255,255,255,0.18)";
+          }
+          ctx.fillStyle = fill;
+          ctx.fillRect(dc * CELL, dr * CELL, CELL - 1, CELL - 1);
+          ctx.strokeStyle = "rgba(255,255,255,0.18)";
+          ctx.strokeRect(dc * CELL + 0.5, dr * CELL + 0.5, CELL - 2, CELL - 2);
+        }
+      }
+    };
+    if (mode === "wireworld") {
+      const wireTheme = WIREWORLD_THEMES.find((theme) => theme.id === wireThemeId) || WIREWORLD_THEMES[0];
+      const { visRows, visCols, rowOff, colOff } = getViewport(zoomRef.current);
+      ctx.fillStyle = wireTheme.colors.empty;
+      ctx.fillRect(0, 0, cv.width, cv.height);
+      for (let r = 0; r < visRows; r++) {
+        for (let c = 0; c < visCols; c++) {
+          const gr = r + rowOff;
+          const gc = c + colOff;
+          const s = g[gr][gc];
+          if (s === WIRE_EMPTY) continue;
+          ctx.fillStyle =
+            s === WIRE_CONDUCTOR ? wireTheme.colors.conductor :
+            s === WIRE_HEAD ? wireTheme.colors.head :
+            wireTheme.colors.tail;
+          ctx.fillRect(c * CELL, r * CELL, CELL - 1, CELL - 1);
+        }
+      }
+      drawPatternPreview();
+      return;
+    }
+    if (mode === "langton") {
+      const { visRows, visCols, rowOff, colOff } = getViewport(zoomRef.current);
+      const stateColors = sampleLangtonStateColors(langtonRule, colorRef.current);
+      ctx.fillStyle = "#050816";
+      ctx.fillRect(0, 0, cv.width, cv.height);
+      for (let r = 0; r < visRows; r++) {
+        for (let c = 0; c < visCols; c++) {
+          const gr = r + rowOff;
+          const gc = c + colOff;
+          const s = g[gr][gc];
+          if (s === 0) continue;
+          const color = stateColors[s % stateColors.length] || hexToRgb("#38bdf8");
+          ctx.fillStyle = `rgb(${color.r}, ${color.g}, ${color.b})`;
+          ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
+        }
+      }
+      if (langtonShowTrails) {
+        for (const trail of langtonTrailsRef.current) {
+          if (!trail || trail.length < 2) continue;
+          for (let i = 1; i < trail.length; i++) {
+            const prev = trail[i - 1];
+            const curr = trail[i];
+            if (
+              prev.y < rowOff || prev.y >= rowOff + visRows || prev.x < colOff || prev.x >= colOff + visCols ||
+              curr.y < rowOff || curr.y >= rowOff + visRows || curr.x < colOff || curr.x >= colOff + visCols
+            ) continue;
+            const alpha = i / trail.length;
+            const rgb = hexToRgb(curr.color || "#f8fafc") || hexToRgb("#f8fafc");
+            ctx.strokeStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},${(alpha * 0.5).toFixed(3)})`;
+            ctx.lineWidth = Math.max(1, CELL * 0.35);
+            ctx.beginPath();
+            ctx.moveTo((prev.x - colOff + 0.5) * CELL, (prev.y - rowOff + 0.5) * CELL);
+            ctx.lineTo((curr.x - colOff + 0.5) * CELL, (curr.y - rowOff + 0.5) * CELL);
+            ctx.stroke();
+          }
+        }
+      }
+      for (const ant of langtonAntsRef.current) {
+        if (ant.y < rowOff || ant.y >= rowOff + visRows || ant.x < colOff || ant.x >= colOff + visCols) continue;
+        const px = (ant.x - colOff) * CELL;
+        const py = (ant.y - rowOff) * CELL;
+        const rgb = hexToRgb(ant.color || "#f8fafc") || hexToRgb("#f8fafc");
+        ctx.fillStyle = `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`;
+        ctx.fillRect(px, py, CELL, CELL);
+        if (langtonShowDirections) {
+          ctx.strokeStyle = "rgba(15,23,42,0.9)";
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          const cx = px + CELL / 2;
+          const cy = py + CELL / 2;
+          ctx.moveTo(cx, cy);
+          if (ant.dir === 0) ctx.lineTo(cx, py + 1);
+          else if (ant.dir === 1) ctx.lineTo(px + CELL - 1, cy);
+          else if (ant.dir === 2) ctx.lineTo(cx, py + CELL - 1);
+          else ctx.lineTo(px + 1, cy);
+          ctx.stroke();
+        }
+      }
+      drawPatternPreview();
+      return;
+    }
     if (mode === "boids") {
       ctx.fillStyle = "#0b1220";
       ctx.fillRect(0, 0, cv.width, cv.height);
@@ -1688,6 +2615,7 @@ export default function CellularAutomataDemo() {
         ctx.fillRect(c * CELL, r * CELL, CELL - 1, CELL - 1);
       }
     }
+    drawPatternPreview();
   }
 
   useEffect(() => {
@@ -1921,6 +2849,21 @@ export default function CellularAutomataDemo() {
             }
             if (hit) setSlimeEscaped(true);
           }
+        } else if (mode === "wireworld") {
+          gridRef.current = stepWireworld(gridRef.current, wireOrthogonalOnly);
+        } else if (mode === "langton") {
+          const langtonSteps = Math.max(1, Math.round(speedFactor));
+          for (let li = 0; li < langtonSteps; li++) {
+            const stepped = stepLangton(gridRef.current, langtonAntsRef.current, langtonRule);
+            gridRef.current = stepped.grid;
+            langtonAntsRef.current = stepped.ants;
+            if (langtonShowTrails) {
+              langtonTrailsRef.current = stepped.ants.map((ant, index) => {
+                const prev = langtonTrailsRef.current[index] || [];
+                return [...prev.slice(-64), { x: ant.x, y: ant.y, color: ant.color }];
+              });
+            }
+          }
         } else {
           gridRef.current = mode === "conway"
             ? stepLife(gridRef.current, birth, survive)
@@ -1931,13 +2874,17 @@ export default function CellularAutomataDemo() {
       setGeneration((g) => g + subSteps);
     }, tickMs);
     return () => clearInterval(t);
-  }, [running, mode, birth, survive, tickMs, boidSeparation, boidAlignment, boidCohesion, boidSteer, boidVision, boidMinSpeed, boidMaxSpeed, boidDrag, boidRandomness, boidBounce, boidColorMode, sharkEnabled, nbodyGravity, nbodyDamping, nbodySoftening, nbodyMaxSpeed, nbodyRepel, slimeCount, slimeSensorAngle, slimeSensorDist, slimeTurnSpeed, slimeSpeed, slimeDeposit, slimeDecay, slimeDiffuse, slimeWiggle, slimeMazeMode, slimeSolverType, slimeEscaped]);
+  }, [running, mode, birth, survive, tickMs, boidSeparation, boidAlignment, boidCohesion, boidSteer, boidVision, boidMinSpeed, boidMaxSpeed, boidDrag, boidRandomness, boidBounce, boidColorMode, sharkEnabled, nbodyGravity, nbodyDamping, nbodySoftening, nbodyMaxSpeed, nbodyRepel, slimeCount, slimeSensorAngle, slimeSensorDist, slimeTurnSpeed, slimeSpeed, slimeDeposit, slimeDecay, slimeDiffuse, slimeWiggle, slimeMazeMode, slimeSolverType, slimeEscaped, langtonRule, langtonShowTrails, speedFactor, wireThemeId, wireOrthogonalOnly, patternBrush, patternRotation]);
 
   // Redraw immediately when zoom changes (canvas dims reset, need sync redraw)
   useLayoutEffect(() => {
     zoomRef.current = zoom;
     draw(gridRef.current);
   }, [zoom]);
+
+  useEffect(() => {
+    draw(gridRef.current);
+  }, [mode, langtonRule, langtonShowDirections, langtonShowTrails, wireBrush, wireThemeId, patternBrush, patternRotation]);
 
   useEffect(() => {
     if (mode === "slime") {
@@ -1959,12 +2906,20 @@ export default function CellularAutomataDemo() {
   }, [slimeMazeMode, slimeSolverType]);
 
   function randomize() {
+    resetPatternUndo();
+    if (mode !== "wireworld") resetWirePowerSnapshot();
     if (mode === "boids") {
       stopBoidSpawnHold(); stopNBodySpawnHold();
       const cv = canvasRef.current;
       boidsRef.current = makeBoids(boidCount, cv?.width || GRID_COLS * CELL, cv?.height || GRID_ROWS * CELL, boidShape);
       setBoidSpawnMode(false);
       setBoidSpawnPopupOpen(false);
+    } else if (mode === "wireworld") {
+      resetWirePowerSnapshot();
+      gridRef.current = makeRandomWireworldGrid();
+    } else if (mode === "langton") {
+      gridRef.current = makeLangtonGrid();
+      randomizeLangtonAnts(langtonAntCount);
     } else if (mode === "nbody") {
       const cv = canvasRef.current;
       const preset = NBODY_PRESETS.find((p) => p.id === nbodyPreset) || null;
@@ -1985,11 +2940,20 @@ export default function CellularAutomataDemo() {
     setGeneration(0);
   }
   function clearGrid() {
+    resetPatternUndo();
+    if (mode !== "wireworld") resetWirePowerSnapshot();
     if (mode === "boids") {
       stopBoidSpawnHold(); stopNBodySpawnHold();
       boidsRef.current = [];
       setBoidSpawnMode(false);
       setBoidSpawnPopupOpen(false);
+    } else if (mode === "wireworld") {
+      resetWirePowerSnapshot();
+      gridRef.current = makeLangtonGrid(WIRE_EMPTY);
+    } else if (mode === "langton") {
+      gridRef.current = makeLangtonGrid();
+      langtonAntsRef.current = [];
+      langtonTrailsRef.current = [];
     } else if (mode === "nbody") {
       nbodyRef.current = [];
       nbodyTrailsRef.current = [];
@@ -2028,6 +2992,7 @@ export default function CellularAutomataDemo() {
       patternHoldRef.current.timer = null;
       patternHoldRef.current.fired = true;
       setPatternRotation((prev) => (prev + 1) % 4);
+      draw(gridRef.current);
     }, 320);
   }
 
@@ -2036,9 +3001,98 @@ export default function CellularAutomataDemo() {
     if (timer) {
       clearTimeout(timer);
       patternHoldRef.current.timer = null;
-      paintAt(x, y);
     }
     patternHoldRef.current.fired = false;
+  }
+
+  function startPatternPreview(clientX, clientY) {
+    patternPreviewRef.current = { active: true, x: clientX, y: clientY };
+    draw(gridRef.current);
+    requestAnimationFrame(() => draw(gridRef.current));
+  }
+
+  function updatePatternPreview(clientX, clientY) {
+    if (!patternPreviewRef.current.active) return;
+    patternPreviewRef.current.x = clientX;
+    patternPreviewRef.current.y = clientY;
+    draw(gridRef.current);
+  }
+
+  function clearPatternPreview() {
+    if (!patternPreviewRef.current.active) return;
+    patternPreviewRef.current.active = false;
+    draw(gridRef.current);
+  }
+
+  function commitPatternPreview() {
+    if (!patternPreviewRef.current.active) return;
+    const { x, y } = patternPreviewRef.current;
+    patternPreviewRef.current.active = false;
+    paintAt(x, y);
+  }
+
+  function pushPatternUndoSnapshot() {
+    const snapshot = {
+      mode,
+      grid: gridRef.current.map((row) => [...row]),
+      langtonAnts: mode === "langton" ? langtonAntsRef.current.map((ant) => ({ ...ant })) : null,
+      langtonTrails: mode === "langton"
+        ? langtonTrailsRef.current.map((trail) => trail.map((point) => ({ ...point })))
+        : null,
+      langtonAntCount: mode === "langton" ? langtonAntCount : null,
+    };
+    patternUndoRef.current = [...patternUndoRef.current.slice(-49), snapshot];
+    setPatternUndoCount(patternUndoRef.current.length);
+  }
+
+  function undoPatternPlacement() {
+    const snapshot = patternUndoRef.current[patternUndoRef.current.length - 1];
+    if (!snapshot) return;
+    patternUndoRef.current = patternUndoRef.current.slice(0, -1);
+    gridRef.current = snapshot.grid.map((row) => [...row]);
+    if (snapshot.mode === "langton") {
+      langtonAntsRef.current = (snapshot.langtonAnts || []).map((ant) => ({ ...ant }));
+      langtonTrailsRef.current = (snapshot.langtonTrails || []).map((trail) => trail.map((point) => ({ ...point })));
+      setLangtonAntCount(snapshot.langtonAntCount ?? langtonAntsRef.current.length);
+    }
+    setPatternUndoCount(patternUndoRef.current.length);
+    draw(gridRef.current);
+  }
+
+  function resetPatternUndo() {
+    patternUndoRef.current = [];
+    setPatternUndoCount(0);
+  }
+
+  function resetWirePowerSnapshot() {
+    wirePowerSnapshotRef.current = null;
+    setWirePowerOff(false);
+  }
+
+  function toggleWirePower() {
+    if (mode !== "wireworld") return;
+    if (!wirePowerOff) {
+      wirePowerSnapshotRef.current = gridRef.current.map((row) => [...row]);
+      gridRef.current = deEnergizeWireworldGrid(gridRef.current);
+      setWirePowerOff(true);
+    } else if (wirePowerSnapshotRef.current) {
+      gridRef.current = wirePowerSnapshotRef.current.map((row) => [...row]);
+      wirePowerSnapshotRef.current = null;
+      setWirePowerOff(false);
+    } else {
+      setWirePowerOff(false);
+    }
+    draw(gridRef.current);
+  }
+
+  function beginBrushUndoStroke() {
+    if (brushUndoStrokeRef.current) return;
+    pushPatternUndoSnapshot();
+    brushUndoStrokeRef.current = true;
+  }
+
+  function endBrushUndoStroke() {
+    brushUndoStrokeRef.current = false;
   }
 
   // sr, sc are viewport-relative coordinates
@@ -2061,6 +3115,17 @@ export default function CellularAutomataDemo() {
     if (mode === "boids") return;
     const cv = canvasRef.current;
     if (!cv) return;
+    if (patternBrush && PRESET_LIBRARY[patternBrush]) {
+      pushPatternUndoSnapshot();
+      if (mode === "wireworld") {
+        applyWirePreset(patternBrush, "pointer", clientX, clientY, true);
+        return;
+      }
+      if (mode === "langton") {
+        applyLangtonPreset(patternBrush, "pointer", clientX, clientY, true);
+        return;
+      }
+    }
     const rect = cv.getBoundingClientRect();
     const sx = cv.width / rect.width, sy = cv.height / rect.height;
     const { visRows, visCols, rowOff, colOff } = getViewport(zoomRef.current);
@@ -2068,13 +3133,21 @@ export default function CellularAutomataDemo() {
     const vrow = Math.floor(((clientY - rect.top) * sy) / CELL);
     if (vrow < 0 || vrow >= visRows || vcol < 0 || vcol >= visCols) return;
     if (patternBrush) {
+      pushPatternUndoSnapshot();
       const p = rotatePattern(PATTERNS[patternBrush], patternRotation);
       stamp(p, vrow - Math.floor(p.length / 2), vcol - Math.floor(p[0].length / 2));
       return;
     }
     const gridRow = vrow + rowOff, gridCol = vcol + colOff;
     const next = gridRef.current.map((r) => [...r]);
-    next[gridRow][gridCol] = mode === "conway" && brush === DYING ? OFF : brush;
+    next[gridRow][gridCol] =
+      mode === "wireworld"
+        ? wireBrush
+        : mode === "langton"
+          ? (brush === OFF ? 0 : 1)
+          : mode === "conway" && brush === DYING
+            ? OFF
+            : brush;
     gridRef.current = next;
     draw(gridRef.current);
   }
@@ -2181,6 +3254,8 @@ export default function CellularAutomataDemo() {
   }
 
   function selectMode(nextMode) {
+    resetPatternUndo();
+    if (nextMode !== "wireworld") resetWirePowerSnapshot();
     setModeDropdownOpen(false);
     setMode(nextMode);
     if (nextMode === "boids") {
@@ -2203,6 +3278,17 @@ export default function CellularAutomataDemo() {
         orbiterMass: nbodyOrbiterMass,
       });
       nbodyTrailsRef.current = [];
+    } else if (nextMode === "wireworld") {
+      resetWirePowerSnapshot();
+      colorRef.current = null;
+      setColorPaletteId(null);
+      applyWirePreset(wirePresetId || "wireStraight");
+      setRunning(false);
+    } else if (nextMode === "langton") {
+      const spectral = PALETTES.find((p) => p.id === "spectral") || PALETTES[0];
+      colorRef.current = spectral?.colors || null;
+      setColorPaletteId(spectral?.id ?? null);
+      applyLangtonPreset(langtonPresetId || "antClassic");
     } else if (nextMode === "slime") {
       resetSlimeWorld(slimeMazeMode);
     } else {
@@ -2316,6 +3402,83 @@ export default function CellularAutomataDemo() {
     setGeneration(0);
   }
 
+  function applyWirePreset(presetId, placement = "center", clientX = null, clientY = null, additive = false) {
+    const preset = PRESET_LIBRARY[presetId];
+    if (!preset || preset.modeId !== "wireworld") return;
+    let centerRow = Math.floor(GRID_ROWS / 2);
+    let centerCol = Math.floor(GRID_COLS / 2);
+    if (placement === "pointer" && clientX != null && clientY != null) {
+      const cv = canvasRef.current;
+      if (cv) {
+        const rect = cv.getBoundingClientRect();
+        const sx = cv.width / rect.width;
+        const sy = cv.height / rect.height;
+        const { rowOff, colOff } = getViewport(zoomRef.current);
+        centerCol = Math.floor(((clientX - rect.left) * sx) / CELL) + colOff;
+        centerRow = Math.floor(((clientY - rect.top) * sy) / CELL) + rowOff;
+      }
+    }
+    const base = additive ? gridRef.current : makeLangtonGrid(WIRE_EMPTY);
+    const { grid } = applyStructuredPreset(base, preset, centerRow, centerCol, "wireworld");
+    gridRef.current = grid;
+    setWirePresetId(presetId);
+    setPatternBrush(presetId);
+    setBrush(WIRE_CONDUCTOR);
+    setRunning(true);
+    draw(gridRef.current);
+  }
+
+  function applyLangtonPreset(presetId, placement = "center", clientX = null, clientY = null, additive = false) {
+    const preset = PRESET_LIBRARY[presetId];
+    if (!preset || preset.modeId !== "langton") return;
+    let centerRow = Math.floor(GRID_ROWS / 2);
+    let centerCol = Math.floor(GRID_COLS / 2);
+    if (placement === "pointer" && clientX != null && clientY != null) {
+      const cv = canvasRef.current;
+      if (cv) {
+        const rect = cv.getBoundingClientRect();
+        const sx = cv.width / rect.width;
+        const sy = cv.height / rect.height;
+        const { rowOff, colOff } = getViewport(zoomRef.current);
+        centerCol = Math.floor(((clientX - rect.left) * sx) / CELL) + colOff;
+        centerRow = Math.floor(((clientY - rect.top) * sy) / CELL) + rowOff;
+      }
+    }
+    const base = additive ? gridRef.current : makeLangtonGrid();
+    const { grid, ants } = applyStructuredPreset(base, preset, centerRow, centerCol, "langton");
+    gridRef.current = grid;
+    const combinedAnts = additive ? [...langtonAntsRef.current, ...ants] : ants;
+    langtonAntsRef.current = combinedAnts;
+    langtonTrailsRef.current = additive
+      ? [...langtonTrailsRef.current, ...ants.map((ant) => [{ x: ant.x, y: ant.y, color: ant.color }])]
+      : ants.map((ant) => [{ x: ant.x, y: ant.y, color: ant.color }]);
+    setLangtonRule(preset.rule || LANGTON_DEFAULT_RULE);
+    setLangtonAntCount(combinedAnts.length || 1);
+    setLangtonPresetId(presetId);
+    setPatternBrush(presetId);
+    setRunning(true);
+    draw(gridRef.current);
+  }
+
+  function resetLangtonAnts() {
+    if (PRESET_LIBRARY[langtonPresetId]) {
+      applyLangtonPreset(langtonPresetId);
+      return;
+    }
+    langtonTrailsRef.current = [];
+    langtonAntsRef.current = [makeLangtonAnt(Math.floor(GRID_COLS / 2), Math.floor(GRID_ROWS / 2), 0)];
+    setLangtonAntCount(1);
+    draw(gridRef.current);
+  }
+
+  function randomizeLangtonAnts(count = langtonAntCount) {
+    const ants = makeRandomLangtonAnts(count);
+    langtonAntsRef.current = ants;
+    langtonTrailsRef.current = ants.map((ant) => [{ x: ant.x, y: ant.y, color: ant.color }]);
+    setLangtonAntCount(ants.length);
+    draw(gridRef.current);
+  }
+
   function applyNBodyPreset(presetId) {
     const preset = NBODY_PRESETS.find((p) => p.id === presetId) || NBODY_PRESETS[0];
     setNbodyPreset(preset.id);
@@ -2337,6 +3500,10 @@ export default function CellularAutomataDemo() {
 
   const ruleString = mode === "brian"
     ? "Brian's Brain"
+    : mode === "wireworld"
+      ? (wireOrthogonalOnly ? "Orthogonal-only experimental routing" : "Electron heads propagate through conductors")
+    : mode === "langton"
+      ? sanitizeLangtonRule(langtonRule)
     : mode === "boids"
       ? "Separation · Alignment · Cohesion"
       : mode === "nbody"
@@ -2346,6 +3513,7 @@ export default function CellularAutomataDemo() {
       : `B${birth.join("") || "—"}/S${survive.join("") || "—"}`;
 
   const cat = CATALOG[mode] ?? [];
+  const activePatternLabel = cat.find((item) => item.key === patternBrush)?.label || patternBrush;
 
   // Canvas size = visCols*CELL × visRows*CELL — cells always 5×5px square, no CSS scaling
   const { visRows, visCols } = getViewport(zoom, windowSize.w, windowSize.h);
@@ -2421,8 +3589,13 @@ export default function CellularAutomataDemo() {
             draw(gridRef.current);
             startNBodySpawnHold(x, y);
           } else {
-            if (patternBrush) startPatternHold(e.clientX, e.clientY);
-            else paintAt(e.clientX, e.clientY);
+            if (patternBrush) {
+              startPatternPreview(e.clientX, e.clientY);
+              if (mode === "conway" || mode === "brian") startPatternHold(e.clientX, e.clientY);
+            } else {
+              beginBrushUndoStroke();
+              paintAt(e.clientX, e.clientY);
+            }
           }
         }}
         onPointerMove={(e) => {
@@ -2448,9 +3621,13 @@ export default function CellularAutomataDemo() {
             nbodySpawnHoldRef.current.x = (e.clientX - rect.left) * sx;
             nbodySpawnHoldRef.current.y = (e.clientY - rect.top) * sy;
           } else if (patternBrush) {
-            patternHoldRef.current.x = e.clientX;
-            patternHoldRef.current.y = e.clientY;
+            updatePatternPreview(e.clientX, e.clientY);
+            if (mode === "conway" || mode === "brian") {
+              patternHoldRef.current.x = e.clientX;
+              patternHoldRef.current.y = e.clientY;
+            }
           } else if (mode !== "slime") {
+            beginBrushUndoStroke();
             paintAt(e.clientX, e.clientY);
           }
         }}
@@ -2469,15 +3646,21 @@ export default function CellularAutomataDemo() {
           };
         }}
         onPointerUp={() => {
-          if (patternBrush && mode !== "boids" && mode !== "slime" && mode !== "nbody") finishPatternHold();
+          if (patternBrush) {
+            if (mode === "conway" || mode === "brian") finishPatternHold();
+            commitPatternPreview();
+          }
           drawingRef.current = false;
+          endBrushUndoStroke();
           mouseRef.current.active = false;
           stopBoidSpawnHold();
           stopNBodySpawnHold();
         }}
         onPointerCancel={() => {
           cancelPatternHold();
+          clearPatternPreview();
           drawingRef.current = false;
+          endBrushUndoStroke();
           mouseRef.current.active = false;
           stopBoidSpawnHold();
           stopNBodySpawnHold();
@@ -2499,20 +3682,20 @@ export default function CellularAutomataDemo() {
           <span
             className="w-1.5 h-1.5 rounded-full"
             style={{
-              background: mode === "brian" ? "#7c3aed" : "#38bdf8",
-              boxShadow: `0 0 8px ${mode === "brian" ? "#7c3aed" : "#38bdf8"}`,
+              background: mode === "brian" ? "#7c3aed" : mode === "wireworld" ? "#f59e0b" : mode === "langton" ? "#f472b6" : "#38bdf8",
+              boxShadow: `0 0 8px ${mode === "brian" ? "#7c3aed" : mode === "wireworld" ? "#f59e0b" : mode === "langton" ? "#f472b6" : "#38bdf8"}`,
             }}
           />
-        <span className="text-xs font-bold tracking-wider">{mode === "brian" ? "BRAIN" : mode === "conway" ? "LIFE" : mode === "boids" ? "BOIDS" : mode === "slime" ? "SLIME" : "N-BODY"}</span>
+        <span className="text-xs font-bold tracking-wider">{mode === "brian" ? "BRAIN" : mode === "conway" ? "LIFE" : mode === "wireworld" ? "WIREWORLD" : mode === "langton" ? "LANGTON" : mode === "boids" ? "BOIDS" : mode === "slime" ? "SLIME" : "N-BODY"}</span>
         <span className="text-[11px] text-slate-400 font-mono pl-2 ml-1 border-l border-white/10">
-          {mode === "brian" ? "·" : mode === "boids" ? "SAC" : mode === "slime" ? "PHYS" : mode === "nbody" ? "GRAV" : `${birth.join("")||"—"}/${survive.join("")||"—"}`}
+          {mode === "brian" ? "·" : mode === "wireworld" ? "WW" : mode === "langton" ? sanitizeLangtonRule(langtonRule) : mode === "boids" ? "SAC" : mode === "slime" ? "PHYS" : mode === "nbody" ? "GRAV" : `${birth.join("")||"—"}/${survive.join("")||"—"}`}
         </span>
           <span className="text-slate-400 text-[10px]">{modeDropdownOpen ? "▲" : "▼"}</span>
         </button>
         {modeDropdownOpen && (
           <div className="mt-2 min-w-[180px] p-1.5 rounded-2xl bg-slate-900/90 backdrop-blur-2xl border border-white/10 shadow-2xl shadow-black/50">
             {MODE_ORDER.map((modeId) => {
-              const label = modeId === "brian" ? "BRAIN" : modeId === "conway" ? "LIFE" : modeId === "boids" ? "BOIDS" : modeId === "slime" ? "SLIME" : "N-BODY";
+              const label = modeId === "brian" ? "BRAIN" : modeId === "conway" ? "LIFE" : modeId === "wireworld" ? "WIREWORLD" : modeId === "langton" ? "LANGTON" : modeId === "boids" ? "BOIDS" : modeId === "slime" ? "SLIME" : "N-BODY";
               return (
                 <button
                   key={`mode-option-${modeId}`}
@@ -2529,6 +3712,31 @@ export default function CellularAutomataDemo() {
           </div>
         )}
       </div>
+
+      {(mode === "wireworld" || mode === "langton") && !sheet && (
+        <div
+          className="absolute left-4 z-20 max-w-[min(34rem,calc(100vw-32px))] px-3 py-1.5 rounded-full bg-slate-900/70 backdrop-blur-xl border border-white/10 text-[11px] text-slate-200"
+          style={{ top: "calc(max(env(safe-area-inset-top), 16px) + 46px)" }}
+        >
+          {MODE_DESCRIPTIONS[mode]}
+        </div>
+      )}
+
+      {mode === "wireworld" && !sheet && (
+        <div
+          className="absolute left-4 z-20 flex flex-wrap items-center gap-1.5 max-w-[calc(100vw-32px)]"
+          style={{ top: "calc(max(env(safe-area-inset-top), 16px) + 84px)" }}
+        >
+          <button
+            onClick={toggleWirePower}
+            className={`px-3 py-1.5 rounded-full text-[11px] font-semibold backdrop-blur-xl border active:scale-95 transition ${
+              wirePowerOff
+                ? "bg-slate-100 border-white/30 text-slate-950"
+                : "bg-slate-900/70 border-white/10 text-slate-200"
+            }`}
+          >{wirePowerOff ? "Restore Power" : "Power Off"}</button>
+        </div>
+      )}
 
       {mode === "boids" && !sheet && (
         <div
@@ -2674,7 +3882,14 @@ export default function CellularAutomataDemo() {
       {/* ─── Pattern brush badge ─── */}
       {patternBrush && mode !== "boids" && mode !== "slime" && !sheet && (
         <div className="absolute left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-violet-600/85 backdrop-blur-xl border border-white/15 shadow-lg shadow-violet-600/40" style={{ top: "max(env(safe-area-inset-top), 12px)" }}>
-          <span className="text-xs font-bold">● Tap to place {patternBrush} · {patternRotation * 90}°</span>
+          <span className="text-xs font-bold">● Press and release to place {activePatternLabel}{mode === "conway" || mode === "brian" ? ` · ${patternRotation * 90}°` : ""}</span>
+          <button
+            onClick={undoPatternPlacement}
+            disabled={patternUndoCount === 0}
+            className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition ${
+              patternUndoCount > 0 ? "bg-white/20 hover:bg-white/30 text-white" : "bg-white/10 text-white/45 cursor-not-allowed"
+            }`}
+          >Undo {patternUndoCount > 0 ? `(${patternUndoCount})` : ""}</button>
           <button
             onClick={() => setPatternBrush(null)}
             className="w-4 h-4 rounded-full bg-white/25 hover:bg-white/40 text-[10px] flex items-center justify-center"
@@ -2691,7 +3906,7 @@ export default function CellularAutomataDemo() {
               <HudIcon onClick={clearGrid} title="Clear"><TrashIcon /></HudIcon>
               <HudIcon onClick={randomize} title="Randomize"><DiceIcon /></HudIcon>
               {mode !== "boids" && mode !== "slime" && mode !== "nbody" && <HudIcon onClick={() => setSheet("brush")} title="Brush"
-                active={sheet === "brush"} activeColor={brushColor(brush)}
+                active={sheet === "brush"} activeColor={brushColor(mode, brush, wireBrush)}
               ><BrushIcon /></HudIcon>}
               <button
                 onClick={() => {
@@ -2737,6 +3952,7 @@ export default function CellularAutomataDemo() {
             {sheet === "brush" && (
               <BrushSheet
                 brush={brush} setBrush={setBrush} mode={mode}
+                wireBrush={wireBrush} setWireBrush={setWireBrush}
                 patternBrush={patternBrush} setPatternBrush={setPatternBrush}
                 onClose={() => setSheet(null)}
               />
@@ -2754,6 +3970,9 @@ export default function CellularAutomataDemo() {
                 mode={mode} preset={preset} applyPreset={applyPreset}
                 birth={birth} setBirth={setBirth}
                 survive={survive} setSurvive={setSurvive}
+                wirePresetId={wirePresetId}
+                wireOrthogonalOnly={wireOrthogonalOnly}
+                setWireOrthogonalOnly={setWireOrthogonalOnly}
                 boidCount={boidCount} setBoidCount={setBoidCount}
                 boidVision={boidVision} setBoidVision={setBoidVision}
                 boidSeparation={boidSeparation} setBoidSeparation={setBoidSeparation}
@@ -2800,6 +4019,14 @@ export default function CellularAutomataDemo() {
                 replaySlimeCheckpoint={replaySlimeCheckpoint}
                 loadUTestMaze={loadUTestMaze}
                 regenerateSlimeMaze={() => { resetSlimeWorld(true); draw(gridRef.current); }}
+                langtonRule={langtonRule} setLangtonRule={setLangtonRule}
+                langtonAntCount={langtonAntCount} setLangtonAntCount={setLangtonAntCount}
+                langtonShowDirections={langtonShowDirections} setLangtonShowDirections={setLangtonShowDirections}
+                langtonShowTrails={langtonShowTrails} setLangtonShowTrails={setLangtonShowTrails}
+                langtonPresetId={langtonPresetId}
+                applyLangtonPreset={applyLangtonPreset}
+                resetLangtonAnts={resetLangtonAnts}
+                randomizeLangtonAnts={randomizeLangtonAnts}
                 onResetBoids={resetBoidsDefaults}
                 onResetNBody={resetNBodyDefaults}
                 reinitBoids={() => {
@@ -2842,6 +4069,8 @@ export default function CellularAutomataDemo() {
                 boidColorMode={boidColorMode}
                 setBoidColorMode={setBoidColorMode}
                 colorPaletteId={colorPaletteId}
+                wireThemeId={wireThemeId}
+                setWireThemeId={setWireThemeId}
                 selectPalette={(p) => { selectPalette(p); setSheet(null); }}
                 onClose={() => setSheet(null)}
               />
@@ -2881,14 +4110,75 @@ function SheetHeader({ title, onClose }) {
   );
 }
 
-function brushColor(brush) {
+function brushColor(mode, brush, wireBrush) {
+  if (mode === "wireworld") {
+    if (wireBrush === WIRE_CONDUCTOR) return "bg-amber-500";
+    if (wireBrush === WIRE_HEAD) return "bg-cyan-500";
+    if (wireBrush === WIRE_TAIL) return "bg-orange-500";
+    return "bg-red-600";
+  }
+  if (mode === "langton") return brush === OFF ? "bg-slate-300" : "bg-fuchsia-500";
   if (brush === ON) return "bg-sky-500";
   if (brush === DYING) return "bg-violet-600";
   return "bg-red-600";
 }
 
 // ─── Sheet bodies ──────────────────────────────────────────────
-function BrushSheet({ brush, setBrush, mode, patternBrush, setPatternBrush, onClose }) {
+function BrushSheet({ brush, setBrush, mode, wireBrush, setWireBrush, patternBrush, setPatternBrush, onClose }) {
+  if (mode === "wireworld") {
+    return (
+      <div>
+        <SheetHeader title="Brush" onClose={onClose} />
+        <div className="grid grid-cols-2 gap-2">
+          <BrushCard
+            active={!patternBrush && wireBrush === WIRE_CONDUCTOR}
+            colorClass="bg-amber-500" shadowClass="shadow-amber-500/50"
+            label="Conductor" glyph="═"
+            onClick={() => { setPatternBrush(null); setWireBrush(WIRE_CONDUCTOR); }}
+          />
+          <BrushCard
+            active={!patternBrush && wireBrush === WIRE_HEAD}
+            colorClass="bg-cyan-500" shadowClass="shadow-cyan-500/50"
+            label="Head" glyph="●"
+            onClick={() => { setPatternBrush(null); setWireBrush(WIRE_HEAD); }}
+          />
+          <BrushCard
+            active={!patternBrush && wireBrush === WIRE_TAIL}
+            colorClass="bg-orange-500" shadowClass="shadow-orange-500/50"
+            label="Tail" glyph="◉"
+            onClick={() => { setPatternBrush(null); setWireBrush(WIRE_TAIL); }}
+          />
+          <BrushCard
+            active={!patternBrush && wireBrush === WIRE_EMPTY}
+            colorClass="bg-red-600" shadowClass="shadow-red-600/50"
+            label="Eraser" glyph="○"
+            onClick={() => { setPatternBrush(null); setWireBrush(WIRE_EMPTY); }}
+          />
+        </div>
+      </div>
+    );
+  }
+  if (mode === "langton") {
+    return (
+      <div>
+        <SheetHeader title="Brush" onClose={onClose} />
+        <div className="grid grid-cols-2 gap-2">
+          <BrushCard
+            active={!patternBrush && brush === ON}
+            colorClass="bg-fuchsia-500" shadowClass="shadow-fuchsia-500/50"
+            label="Black Cell" glyph="■"
+            onClick={() => { setPatternBrush(null); setBrush(ON); }}
+          />
+          <BrushCard
+            active={!patternBrush && brush === OFF}
+            colorClass="bg-slate-500" shadowClass="shadow-slate-500/40"
+            label="White Cell" glyph="□"
+            onClick={() => { setPatternBrush(null); setBrush(OFF); }}
+          />
+        </div>
+      </div>
+    );
+  }
   return (
     <div>
       <SheetHeader title="Brush" onClose={onClose} />
@@ -2937,9 +4227,10 @@ function BrushCard({ active, disabled, colorClass, shadowClass, label, glyph, on
 }
 
 function PatternsSheet({ mode, cat, patternBrush, setPatternBrush, patternRotation, setPatternRotation, onClose }) {
+  const title = mode === "conway" ? "Patterns · Life-like" : mode === "brian" ? "Patterns · Brain" : mode === "wireworld" ? "Patterns · Wireworld" : "Patterns · Langton";
   return (
     <div>
-      <SheetHeader title={`Patterns · ${mode === "conway" ? "Life-like" : "Brain"}`} onClose={onClose} />
+      <SheetHeader title={title} onClose={onClose} />
       <div className="grid grid-cols-2 gap-2">
         {cat.map((p) => {
           const active = patternBrush === p.key;
@@ -2956,27 +4247,75 @@ function PatternsSheet({ mode, cat, patternBrush, setPatternBrush, patternRotati
                 active ? `${bgClass} shadow-lg` : "bg-slate-800"
               }`}
             >
-              <PatternThumb pattern={rotatePattern(PATTERNS[p.key], active ? patternRotation : 0)} color={p.color} active={active} />
+              <PatternThumb mode={mode} patternKey={p.key} pattern={rotatePattern(PATTERNS[p.key], active ? patternRotation : 0)} color={p.color} active={active} />
               <div className="min-w-0">
-                <div className="text-[13px] font-bold">{p.label}</div>
+                <div className="flex items-center gap-1.5">
+                  <div className="text-[13px] font-bold">{p.label}</div>
+                  {mode === "wireworld" && (
+                    <>
+                      <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wide ${
+                        PRESET_LIBRARY[p.key]?.variant === "static"
+                          ? active ? "bg-white/20 text-white" : "bg-slate-700 text-slate-200"
+                          : active ? "bg-amber-200/20 text-white" : "bg-amber-500/20 text-amber-200"
+                      }`}>
+                        {PRESET_LIBRARY[p.key]?.variant === "static" ? "Static Blueprint" : "Live Circuit"}
+                      </span>
+                      {PRESET_LIBRARY[p.key]?.ruleSet === "orthogonal" && (
+                        <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wide ${
+                          active ? "bg-cyan-200/20 text-white" : "bg-cyan-500/20 text-cyan-200"
+                        }`}>
+                          Orthogonal Only
+                        </span>
+                      )}
+                    </>
+                  )}
+                </div>
                 <div className={`text-[10px] mt-0.5 ${active ? "text-white/80" : "text-slate-400"}`}>{p.sub}</div>
               </div>
             </button>
           );
         })}
       </div>
-      <div className="mt-3 text-[11px] text-slate-400">Hold on the canvas to rotate the selected pattern by 90°.</div>
+      <div className="mt-3 text-[11px] text-slate-400">
+        {mode === "wireworld" || mode === "langton"
+          ? "Press, drag to preview, then release to place."
+          : "Press, drag to preview, release to place. Hold to rotate 90°."}
+      </div>
     </div>
   );
 }
 
-function PatternThumb({ pattern, color, active }) {
-  if (!pattern) return null;
-  const rows = pattern;
+function PatternThumb({ mode, patternKey, pattern, color, active }) {
+  const preset = PRESET_LIBRARY[patternKey];
+  const rows = pattern || (() => {
+    if (!preset) return null;
+    const width = preset.width || 1;
+    const height = preset.height || 1;
+    const grid = Array.from({ length: height }, () => Array(width).fill(0));
+    for (const cell of preset.cells || []) {
+      if (grid[cell.y] && grid[cell.y][cell.x] != null) grid[cell.y][cell.x] = cell.state;
+    }
+    return grid;
+  })();
+  if (!rows) return null;
   const cols = Math.max(...rows.map((r) => r.length));
   const gap = 1;
   const maxThumb = 30;
   const px = Math.max(1, Math.floor((maxThumb - Math.max(0, cols - 1) * gap) / Math.max(1, cols)));
+  const presetWidth = preset?.width || cols;
+  const presetHeight = preset?.height || rows.length;
+  const getStateColor = (v) => {
+    if (mode === "wireworld") {
+      if (v === WIRE_CONDUCTOR) return "bg-amber-400";
+      if (v === WIRE_HEAD) return "bg-cyan-400";
+      if (v === WIRE_TAIL) return "bg-orange-500";
+      return "bg-transparent";
+    }
+    if (mode === "langton") {
+      return v === 0 ? "bg-transparent" : "bg-fuchsia-400";
+    }
+    return `bg-${v === 1 ? color : v === 2 ? "white/50" : "transparent"}`;
+  };
   return (
     <div
       className={`w-10 h-10 flex-shrink-0 rounded-lg flex items-center justify-center ${
@@ -2984,6 +4323,7 @@ function PatternThumb({ pattern, color, active }) {
       }`}
     >
       <div
+        className="relative"
         style={{
           display: "grid",
           gridTemplateColumns: `repeat(${cols}, ${px}px)`,
@@ -2997,12 +4337,29 @@ function PatternThumb({ pattern, color, active }) {
             return (
               <div
                 key={`${r}-${c}`}
-                className={`rounded-[1px] bg-${v === 1 ? color : v === 2 ? "white/50" : "transparent"}`}
+                className={`rounded-[1px] ${getStateColor(v)}`}
                 style={{ width: px, height: px }}
               />
             );
           })
         )}
+        {preset?.ants?.map((ant, idx) => {
+          const left = ((presetWidth / 2 + ant.x) / Math.max(1, presetWidth)) * (cols * px + Math.max(0, cols - 1) * gap);
+          const top = ((presetHeight / 2 + ant.y) / Math.max(1, presetHeight)) * (rows.length * px + Math.max(0, rows.length - 1) * gap);
+          return (
+            <div
+              key={`ant-${idx}`}
+              className="absolute rounded-full border border-slate-950/60"
+              style={{
+                width: Math.max(2, px),
+                height: Math.max(2, px),
+                left: Math.max(0, left - px * 0.5),
+                top: Math.max(0, top - px * 0.5),
+                background: ant.color || "#f8fafc",
+              }}
+            />
+          );
+        })}
       </div>
     </div>
   );
@@ -3010,6 +4367,7 @@ function PatternThumb({ pattern, color, active }) {
 
 function RulesSheet({
   mode, preset, applyPreset, birth, setBirth, survive, setSurvive,
+  wirePresetId, wireOrthogonalOnly, setWireOrthogonalOnly,
   boidCount, setBoidCount, boidVision, setBoidVision, boidSeparation, setBoidSeparation,
   boidAlignment, setBoidAlignment, boidCohesion, setBoidCohesion, boidSteer, setBoidSteer,
   boidMinSpeed, setBoidMinSpeed, boidMaxSpeed, setBoidMaxSpeed, boidDrag, setBoidDrag,
@@ -3024,6 +4382,8 @@ function RulesSheet({
   slimeMazeMode, setSlimeMazeMode, slimeMazeLevel, setSlimeMazeLevel, slimeSolverType, setSlimeSolverType, slimeEscaped, slimeFillPct,
   slimeCheckpointPct, setSlimeCheckpointPct, slimeRestartPct, setSlimeRestartPct,
   slimeAutoLoop, setSlimeAutoLoop, slimeCheckpointReady, slimeDebugFlow, setSlimeDebugFlow, slimeDebugStats, saveSlimeCheckpointNow, replaySlimeCheckpoint, loadUTestMaze, regenerateSlimeMaze,
+  langtonRule, setLangtonRule, langtonAntCount, setLangtonAntCount, langtonShowDirections, setLangtonShowDirections, langtonShowTrails, setLangtonShowTrails, langtonPresetId,
+  applyLangtonPreset, resetLangtonAnts, randomizeLangtonAnts,
   onResetBoids, onResetNBody, reinitBoids, reinitNBody, toggleNbodyCentralBody, onClose,
 }) {
   return (
@@ -3075,6 +4435,96 @@ function RulesSheet({
         <div className="p-3.5 rounded-2xl bg-slate-800 text-slate-300 text-xs leading-relaxed">
           <div className="text-white font-bold mb-1.5 text-[13px]">Brian's Brain</div>
           Fixed 3-state rule. To edit B/S rules, switch to <span className="text-sky-400 font-bold">Life</span> mode using the chip at top-left.
+        </div>
+      ) : mode === "wireworld" ? (
+        <div className="space-y-3">
+          <div className="p-3.5 rounded-2xl bg-slate-800 text-slate-300 text-xs leading-relaxed">
+            <div className="text-white font-bold mb-1.5 text-[13px]">Wireworld</div>
+            Empty stays empty. Heads become tails, tails cool into conductors, and conductors ignite when 1 or 2 neighboring heads touch them.
+          </div>
+          <button
+            onClick={() => setWireOrthogonalOnly(!wireOrthogonalOnly)}
+            className={`w-full py-2 rounded-xl text-xs font-semibold active:scale-95 transition ${
+              wireOrthogonalOnly ? "bg-slate-100 text-slate-900" : "bg-slate-800 text-slate-200"
+            }`}
+          >{wireOrthogonalOnly ? "Experimental: Orthogonal Only" : "Standard: 8-Neighborhood"}</button>
+          <div className="px-3 py-2 rounded-xl bg-slate-800 text-[11px] text-slate-300">
+            {wireOrthogonalOnly
+              ? "Only up, down, left, right neighbors can ignite a conductor. Existing presets may behave differently."
+              : "Standard Wireworld counts all 8 neighboring cells, including diagonals."}
+          </div>
+          <div className="text-[11px] text-slate-500 uppercase tracking-widest font-bold mb-1">Preset Families</div>
+          <div className="grid grid-cols-2 gap-1.5">
+            {["Basic", "Logic", "Showcase"].map((group) => (
+              <div key={group} className="px-3 py-2 rounded-xl bg-slate-800 text-[11px] text-slate-300">
+                <div className="font-semibold text-white mb-0.5">{group}</div>
+                {group === "Basic" ? "Straight, corner, splitter, loop, pulse generator." : group === "Logic" ? "Diode-like routing, merge, fork, clock." : "Circuit garden and pulse maze."}
+              </div>
+            ))}
+          </div>
+          <div className="px-3 py-2 rounded-xl bg-slate-800 text-[11px] text-slate-300">
+            Current preset: <span className="text-amber-300 font-semibold">{PRESET_LIBRARY[wirePresetId]?.name || "Custom"}</span>
+          </div>
+        </div>
+      ) : mode === "langton" ? (
+        <div className="space-y-3">
+          <div className="p-3.5 rounded-2xl bg-slate-800 text-slate-300 text-xs leading-relaxed">
+            <div className="text-white font-bold mb-1.5 text-[13px]">Langton&apos;s Ant</div>
+            On each step an ant turns left or right from the current cell state, advances one cell, and cycles that cell to the next color in the rule string.
+          </div>
+          <label className="block">
+            <div className="text-[11px] text-slate-500 uppercase tracking-widest font-bold mb-2">Rule String</div>
+            <input
+              value={langtonRule}
+              onChange={(e) => setLangtonRule(sanitizeLangtonRule(e.target.value))}
+              placeholder="RL"
+              className="w-full px-3 py-2 rounded-xl bg-slate-800 text-white text-sm outline-none border border-white/10 focus:border-sky-400/60"
+            />
+          </label>
+          <div className="grid grid-cols-2 gap-1.5">
+            {[
+              { id: "RL", label: "Classic RL" },
+              { id: "RLLR", label: "Chaotic RLLR" },
+              { id: "LLRR", label: "Symmetric LLRR" },
+              { id: "LRRRRRLLR", label: "Colorful LRRRRRLLR" },
+              { id: "RLR", label: "Experimental RLR" },
+              { id: "LLRRRLR", label: "Experimental LLRRRLR" },
+            ].map((rule) => (
+              <button
+                key={rule.id}
+                onClick={() => setLangtonRule(rule.id)}
+                className={`px-3 py-2 rounded-xl text-[11px] font-semibold text-left transition active:scale-95 ${
+                  langtonRule === rule.id ? "bg-fuchsia-500 text-white" : "bg-slate-800 text-slate-300"
+                }`}
+              >{rule.label}</button>
+            ))}
+          </div>
+          <RangeRow label="Ants" value={langtonAntCount} min={1} max={24} step={1} onChange={setLangtonAntCount} />
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              onClick={() => resetLangtonAnts()}
+              className="w-full py-2 rounded-xl bg-slate-800 text-xs font-semibold text-slate-200 active:scale-95 transition"
+            >Reset Ants</button>
+            <button
+              onClick={() => randomizeLangtonAnts(langtonAntCount)}
+              className="w-full py-2 rounded-xl bg-slate-800 text-xs font-semibold text-slate-200 active:scale-95 transition"
+            >Random Ants</button>
+            <button
+              onClick={() => setLangtonShowDirections(!langtonShowDirections)}
+              className={`w-full py-2 rounded-xl text-xs font-semibold active:scale-95 transition ${
+                langtonShowDirections ? "bg-slate-100 text-slate-900" : "bg-slate-800 text-slate-200"
+              }`}
+            >{langtonShowDirections ? "Show Directions: On" : "Show Directions: Off"}</button>
+            <button
+              onClick={() => setLangtonShowTrails(!langtonShowTrails)}
+              className={`w-full py-2 rounded-xl text-xs font-semibold active:scale-95 transition ${
+                langtonShowTrails ? "bg-slate-100 text-slate-900" : "bg-slate-800 text-slate-200"
+              }`}
+            >{langtonShowTrails ? "Trails: On" : "Trails: Off"}</button>
+          </div>
+          <div className="px-3 py-2 rounded-xl bg-slate-800 text-[11px] text-slate-300">
+            Current preset: <span className="text-fuchsia-300 font-semibold">{PRESET_LIBRARY[langtonPresetId]?.name || "Custom"}</span>
+          </div>
         </div>
       ) : mode === "boids" ? (
         <div className="space-y-3">
@@ -3291,10 +4741,39 @@ function PaletteIcon() {
   );
 }
 
-function ColorSheet({ mode, boidColorMode, setBoidColorMode, colorPaletteId, selectPalette, onClose }) {
+function ColorSheet({ mode, boidColorMode, setBoidColorMode, colorPaletteId, wireThemeId, setWireThemeId, selectPalette, onClose }) {
+  if (mode === "wireworld") {
+    return (
+      <div>
+        <SheetHeader title="Wireworld Theme" onClose={onClose} />
+        <div className="mb-3 px-3 py-2 rounded-xl bg-slate-800 text-[11px] text-slate-300">
+          Keep semantic colors, but swap the circuit theme for conductor, head, and tail states.
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {WIREWORLD_THEMES.map((theme) => (
+            <button
+              key={theme.id}
+              onClick={() => setWireThemeId(theme.id)}
+              className={`p-2.5 rounded-2xl bg-slate-800 active:scale-95 transition text-left ${
+                wireThemeId === theme.id ? "ring-2 ring-white/40" : ""
+              }`}
+            >
+              <div className="flex gap-1 mb-2">
+                <div className="h-5 flex-1 rounded-md" style={{ background: theme.colors.empty }} />
+                <div className="h-5 flex-1 rounded-md" style={{ background: theme.colors.conductor }} />
+                <div className="h-5 flex-1 rounded-md" style={{ background: theme.colors.head }} />
+                <div className="h-5 flex-1 rounded-md" style={{ background: theme.colors.tail }} />
+              </div>
+              <div className="text-[11px] text-slate-200 font-medium">{theme.label}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
   return (
     <div>
-      <SheetHeader title="Color Mode" onClose={onClose} />
+      <SheetHeader title={mode === "langton" ? "Langton Palette" : "Color Mode"} onClose={onClose} />
       {mode === "boids" && (
         <div className="mb-3">
           <div className="text-[11px] text-slate-500 uppercase tracking-widest font-bold mb-2">Boids Metric</div>
@@ -3309,6 +4788,11 @@ function ColorSheet({ mode, boidColorMode, setBoidColorMode, colorPaletteId, sel
               >{m.label}</button>
             ))}
           </div>
+        </div>
+      )}
+      {mode === "langton" && (
+        <div className="mb-3 px-3 py-2 rounded-xl bg-slate-800 text-[11px] text-slate-300">
+          Cell states cycle through the selected palette in rule-string order.
         </div>
       )}
       <div className="grid grid-cols-3 auto-rows-fr gap-2">
